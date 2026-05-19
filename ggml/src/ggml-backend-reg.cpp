@@ -10,20 +10,8 @@
 #include <type_traits>
 #include <vector>
 #include <cctype>
-
-#ifdef _WIN32
-#    define WIN32_LEAN_AND_MEAN
-#    ifndef NOMINMAX
-#        define NOMINMAX
-#    endif
-#    include <windows.h>
-#elif defined(__APPLE__)
-#    include <mach-o/dyld.h>
-#    include <dlfcn.h>
-#else
-#    include <dlfcn.h>
-#    include <unistd.h>
-#endif
+#include <dlfcn.h>
+#include <unistd.h>
 
 // Backend registry
 #ifdef GGML_USE_CPU
@@ -34,32 +22,12 @@
 #include "ggml-cuda.h"
 #endif
 
-#ifdef GGML_USE_METAL
-#include "ggml-metal.h"
-#endif
-
-#ifdef GGML_USE_SYCL
-#include "ggml-sycl.h"
-#endif
-
 #ifdef GGML_USE_VULKAN
 #include "ggml-vulkan.h"
 #endif
 
-#ifdef GGML_USE_WEBGPU
-#include "ggml-webgpu.h"
-#endif
-
-#ifdef GGML_USE_ZDNN
-#include "ggml-zdnn.h"
-#endif
-
 #ifdef GGML_USE_OPENCL
 #include "ggml-opencl.h"
-#endif
-
-#ifdef GGML_USE_HEXAGON
-#include "ggml-hexagon.h"
 #endif
 
 #ifdef GGML_USE_BLAS
@@ -70,32 +38,14 @@
 #include "ggml-rpc.h"
 #endif
 
-#ifdef GGML_USE_VIRTGPU_FRONTEND
-#include "ggml-virtgpu.h"
-#endif
-
-#ifdef GGML_USE_CANN
-#include "ggml-cann.h"
-#endif
-
-#ifdef GGML_USE_ZENDNN
-#include "ggml-zendnn.h"
-#endif
-
-#ifdef GGML_USE_OPENVINO
-#include "ggml-openvino.h"
-#endif
-
 namespace fs = std::filesystem;
 
 static std::string path_str(const fs::path & path) {
     try {
 #if defined(__cpp_lib_char8_t)
-        // C++20 and later: u8string() returns std::u8string
         const std::u8string u8str = path.u8string();
         return std::string(reinterpret_cast<const char *>(u8str.data()), u8str.size());
 #else
-        // C++17: u8string() returns std::string
         return path.u8string();
 #endif
     } catch (...) {
@@ -116,41 +66,15 @@ struct ggml_backend_registry {
 #ifdef GGML_USE_CUDA
         register_backend(ggml_backend_cuda_reg());
 #endif
-#ifdef GGML_USE_METAL
-        register_backend(ggml_backend_metal_reg());
-#endif
-#ifdef GGML_USE_SYCL
-        register_backend(ggml_backend_sycl_reg());
-#endif
 #ifdef GGML_USE_VULKAN
-    // Add runtime disable check
-    if (getenv("GGML_DISABLE_VULKAN") == nullptr) {
-        register_backend(ggml_backend_vk_reg());
-    } else {
-        GGML_LOG_DEBUG("Vulkan backend disabled by GGML_DISABLE_VULKAN environment variable\n");
-    }
+        if (getenv("GGML_DISABLE_VULKAN") == nullptr) {
+            register_backend(ggml_backend_vk_reg());
+        } else {
+            GGML_LOG_DEBUG("Vulkan backend disabled by GGML_DISABLE_VULKAN environment variable\n");
+        }
 #endif
-#ifdef GGML_USE_WEBGPU
-        register_backend(ggml_backend_webgpu_reg());
-#endif
-#ifdef GGML_USE_ZDNN
-        register_backend(ggml_backend_zdnn_reg());
-#endif
-#ifdef GGML_USE_VIRTGPU_FRONTEND
-        register_backend(ggml_backend_virtgpu_reg());
-#endif
-
 #ifdef GGML_USE_OPENCL
         register_backend(ggml_backend_opencl_reg());
-#endif
-#ifdef GGML_USE_ZENDNN
-        register_backend(ggml_backend_zendnn_reg());
-#endif
-#ifdef GGML_USE_HEXAGON
-        register_backend(ggml_backend_hexagon_reg());
-#endif
-#ifdef GGML_USE_CANN
-        register_backend(ggml_backend_cann_reg());
 #endif
 #ifdef GGML_USE_BLAS
         register_backend(ggml_backend_blas_reg());
@@ -158,20 +82,15 @@ struct ggml_backend_registry {
 #ifdef GGML_USE_RPC
         register_backend(ggml_backend_rpc_reg());
 #endif
-#ifdef GGML_USE_OPENVINO
-        register_backend(ggml_backend_openvino_reg());
-#endif
 #ifdef GGML_USE_CPU
         register_backend(ggml_backend_cpu_reg());
 #endif
     }
 
     ~ggml_backend_registry() {
-        // FIXME: backends cannot be safely unloaded without a function to destroy all the backend resources,
-        // since backend threads may still be running and accessing resources from the dynamic library
         for (auto & entry : backends) {
             if (entry.handle) {
-                entry.handle.release(); // NOLINT
+                entry.handle.release();
             }
         }
     }
@@ -271,13 +190,11 @@ struct ggml_backend_registry {
             GGML_LOG_DEBUG("%s: unloading %s backend\n", __func__, ggml_backend_reg_name(reg));
         }
 
-        // remove devices
         devices.erase(
             std::remove_if(devices.begin(), devices.end(),
                             [reg](ggml_backend_dev_t dev) { return ggml_backend_dev_backend_reg(dev) == reg; }),
             devices.end());
 
-        // remove backend
         backends.erase(it);
     }
 };
@@ -392,40 +309,15 @@ void ggml_backend_unload(ggml_backend_reg_t reg) {
 }
 
 static fs::path get_executable_path() {
-#if defined(__APPLE__)
-    // get executable path
-    std::vector<char> path;
-    uint32_t size;
-    while (true) {
-        size = path.size();
-        if (_NSGetExecutablePath(path.data(), &size) == 0) {
-            break;
-        }
-        path.resize(size);
-    }
-    std::string base_path(path.data(), size);
-    // remove executable name
-    auto last_slash = base_path.find_last_of('/');
-    if (last_slash != std::string::npos) {
-        base_path = base_path.substr(0, last_slash);
-    }
-    return base_path + "/";
-#elif defined(__linux__) || defined(__FreeBSD__)
     std::string base_path = ".";
     std::vector<char> path(1024);
     while (true) {
-        // get executable path
-#    if defined(__linux__)
         ssize_t len = readlink("/proc/self/exe", path.data(), path.size());
-#    elif defined(__FreeBSD__)
-        ssize_t len = readlink("/proc/curproc/file", path.data(), path.size());
-#    endif
         if (len == -1) {
             break;
         }
         if (len < (ssize_t) path.size()) {
             base_path = std::string(path.data(), len);
-            // remove executable name
             auto last_slash = base_path.find_last_of('/');
             if (last_slash != std::string::npos) {
                 base_path = base_path.substr(0, last_slash);
@@ -434,54 +326,19 @@ static fs::path get_executable_path() {
         }
         path.resize(path.size() * 2);
     }
-
     return base_path + "/";
-#elif defined(_WIN32)
-    std::vector<wchar_t> path(MAX_PATH);
-    DWORD len = GetModuleFileNameW(NULL, path.data(), path.size());
-    if (len == 0) {
-        return {};
-    }
-    std::wstring base_path(path.data(), len);
-    // remove executable name
-    auto last_slash = base_path.find_last_of('\\');
-    if (last_slash != std::string::npos) {
-        base_path = base_path.substr(0, last_slash);
-    }
-    return base_path + L"\\";
-#else
-    return {};
-#endif
-}
-
-static fs::path backend_filename_prefix() {
-#ifdef _WIN32
-    return fs::u8path("ggml-");
-#else
-    return fs::u8path("libggml-");
-#endif
-}
-
-static fs::path backend_filename_extension() {
-#ifdef _WIN32
-    return fs::u8path(".dll");
-#else
-    return fs::u8path(".so");
-#endif
 }
 
 static ggml_backend_reg_t ggml_backend_load_best(const char * name, bool silent, const char * user_search_path) {
-    // enumerate all the files that match [lib]ggml-name-*.[so|dll] in the search paths
     const fs::path name_path = fs::u8path(name);
-    const fs::path file_prefix = backend_filename_prefix().native() + name_path.native() + fs::u8path("-").native();
-    const fs::path file_extension = backend_filename_extension();
+    const fs::path file_prefix = fs::u8path("libggml-").native() + name_path.native() + fs::u8path("-").native();
+    const fs::path file_extension = fs::u8path(".so");
 
     std::vector<fs::path> search_paths;
     if (user_search_path == nullptr) {
 #ifdef GGML_BACKEND_DIR
         search_paths.push_back(fs::u8path(GGML_BACKEND_DIR));
 #endif
-        // default search paths: executable directory, current directory
         search_paths.push_back(get_executable_path());
         search_paths.push_back(fs::current_path());
     } else {
@@ -534,9 +391,8 @@ static ggml_backend_reg_t ggml_backend_load_best(const char * name, bool silent,
     }
 
     if (best_score == 0) {
-        // try to load the base backend
         for (const auto & search_path : search_paths) {
-            fs::path filename = backend_filename_prefix().native() + name_path.native() + backend_filename_extension().native();
+            fs::path filename = fs::u8path("libggml-").native() + name_path.native() + fs::u8path(".so").native();
             fs::path path = search_path / filename;
             if (std::error_code ec; fs::exists(path, ec)) {
                 return get_reg().load_backend(path, silent);
@@ -564,21 +420,12 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
 #endif
 
     ggml_backend_load_best("blas", silent, dir_path);
-    ggml_backend_load_best("zendnn", silent, dir_path);
-    ggml_backend_load_best("cann", silent, dir_path);
     ggml_backend_load_best("cuda", silent, dir_path);
-    ggml_backend_load_best("hip", silent, dir_path);
-    ggml_backend_load_best("metal", silent, dir_path);
     ggml_backend_load_best("rpc", silent, dir_path);
-    ggml_backend_load_best("sycl", silent, dir_path);
     ggml_backend_load_best("vulkan", silent, dir_path);
-    ggml_backend_load_best("virtgpu", silent, dir_path);
     ggml_backend_load_best("opencl", silent, dir_path);
-    ggml_backend_load_best("hexagon", silent, dir_path);
-    ggml_backend_load_best("musa", silent, dir_path);
-    ggml_backend_load_best("openvino", silent, dir_path);
     ggml_backend_load_best("cpu", silent, dir_path);
-    // check the environment variable GGML_BACKEND_PATH to load an out-of-tree backend
+
     const char * backend_path = std::getenv("GGML_BACKEND_PATH");
     if (backend_path) {
         ggml_backend_load(backend_path);
