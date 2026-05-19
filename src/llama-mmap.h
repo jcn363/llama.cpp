@@ -35,6 +35,8 @@ struct llama_file {
 
     size_t read_alignment() const;
     bool has_direct_io() const;
+
+
 private:
     struct impl;
     std::unique_ptr<impl> pimpl;
@@ -42,7 +44,7 @@ private:
 
 struct llama_mmap {
     llama_mmap(const llama_mmap &) = delete;
-    llama_mmap(struct llama_file * file, size_t prefetch = (size_t) -1, bool numa = false);
+    llama_mmap(const llama_file * file, size_t prefetch = (size_t) -1, bool numa = false);
     ~llama_mmap();
 
     size_t size() const;

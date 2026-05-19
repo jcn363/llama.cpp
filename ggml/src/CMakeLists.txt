@@ -229,12 +229,7 @@ elseif (GGML_CPU)
     ggml_add_cpu_backend_variant_impl("")
 endif()
 
-ggml_add_backend(BLAS)
 ggml_add_backend(CUDA)
-ggml_add_backend(HIP)
-ggml_add_backend(RPC)
-ggml_add_backend(Vulkan)
-ggml_add_backend(OpenCL)
 
 foreach (target ggml-base ggml)
     target_include_directories(${target} PUBLIC    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include> $<INSTALL_INTERFACE:include>)

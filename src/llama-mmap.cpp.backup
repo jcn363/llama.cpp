@@ -1,0 +1,262 @@
+#include "llama-mmap.h"
+
+#include "llama-impl.h"
+
+#include "ggml.h"
+
+#include <cstring>
+#include <climits>
+#include <stdexcept>
+#include <cerrno>
+#include <algorithm>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+
+// Linux/POSIX file operations
+#define llama_mmap_ftell ftello
+#define llama_mmap_fseek fseeko
+
+// llama_file
+
+struct llama_file::impl {
+    int fd = -1;
+    FILE * fp = NULL;
+    bool owns_fp = true;
+    std::string fname;
+    size_t size = 0;
+    bool failed_already = false;
+ };
+
+ // llama_mlock
+ struct llama_mlock::impl {
+     void * addr = NULL;
+     size_t size = 0;
+     bool failed_already = false;
+ };
+
+ llama_mlock::llama_mlock() : pimpl(std::make_unique<impl>()) {}
+ llama_mlock::~llama_mlock() = default;
+
+ void llama_mlock::init(void * ptr) { pimpl->init(ptr); }
+ void llama_mlock::grow_to(size_t target_size) { pimpl->grow_to(target_size); }
+
+ const bool llama_mlock::SUPPORTED = true;
+
+ size_t llama_path_max() {
+     return 4096;  // PATH_MAX on Linux
+ }
+        seek(0, SEEK_END);
+        size = tell();
+        seek(0, SEEK_SET);
+    }
+
+    impl(FILE * file) : owns_fp(false) {
+        fp = file;
+        seek(0, SEEK_END);
+        size = tell();
+        seek(0, SEEK_SET);
+    }
+
+    size_t tell() const {
+        off_t ret = llama_mmap_ftell(fp);
+        if (ret == -1) {
+            throw std::runtime_error(format("ftell error: %s", strerror(errno)));
+        }
+        return (size_t) ret;
+    }
+
+    void seek(size_t offset, int whence) const {
+        off_t ret = llama_mmap_fseek(fp, offset, whence);
+        if (ret == -1) {
+            throw std::runtime_error(format("seek error: %s", strerror(errno)));
+        }
+    }
+
+    void read_raw_unsafe(void * ptr, size_t len) {
+        if (len == 0) {
+            return;
+        }
+        errno = 0;
+        const size_t curr_off = tell();
+        const size_t to_read = std::min(len, size - curr_off);
+
+        std::size_t ret = std::fread(ptr, to_read, 1, fp);
+        if (ferror(fp)) {
+            throw std::runtime_error(format("read error: %s", strerror(errno)));
+        }
+        if (to_read > 0 && ret != 1) {
+            throw std::runtime_error("unexpectedly reached end of file");
+        }
+    }
+
+    void write_raw_unsafe(const void * ptr, size_t len) const {
+        if (len == 0) {
+            return;
+        }
+        errno = 0;
+        const size_t curr_off = tell();
+        const size_t to_write = std::min(len, size - curr_off);
+
+        std::size_t ret = std::fwrite(ptr, to_write, 1, fp);
+        if (ferror(fp)) {
+            throw std::runtime_error(format("write error: %s", strerror(errno)));
+        }
+        if (to_write > 0 && ret != 1) {
+            throw std::runtime_error("unexpectedly reached end of file");
+        }
+    }
+
+    void flush() {
+        if (fp != NULL) {
+            fflush(fp);
+        }
+    }
+
+    void * map(void * addr, size_t len, [[maybe_unused]] bool write) {
+        return mmap(addr, len, PROT_READ | (write ? PROT_WRITE : 0), MAP_SHARED, fileno(fp), 0);
+    }
+
+    void unmap(void * ptr, size_t len) {
+        munmap(ptr, len);
+    }
+
+    ~impl() {
+        if (fp != NULL && owns_fp) {
+            fclose(fp);
+        }
+    }
+};
+
+// llama_file public interface
+
+llama_file::llama_file(const char * fname, const char * mode, bool use_direct_io) : pimpl(std::make_unique<impl>(fname, mode, use_direct_io)) {}
+llama_file::llama_file(FILE * file) : pimpl(std::make_unique<impl>(file)) {}
+llama_file::~llama_file() = default;
+
+size_t llama_file::tell() const { return pimpl->tell(); }
+size_t llama_file::size() const { return pimpl->size; }
+
+int llama_file::file_id() const { return fileno(pimpl->fp); }
+
+void llama_file::seek(size_t offset, int whence) const { pimpl->seek(offset, whence); }
+
+void llama_file::read_raw(void * ptr, size_t len) { pimpl->read_raw_unsafe(ptr, len); }
+void llama_file::read_raw_unsafe(void * ptr, size_t len) { pimpl->read_raw_unsafe(ptr, len); }
+
+void llama_file::read_aligned_chunk(void * dest, size_t size) {
+    pimpl->read_raw_unsafe(dest, size);
+}
+
+uint32_t llama_file::read_u32() {
+    uint32_t val;
+    pimpl->read_raw_unsafe(&val, sizeof(val));
+    return val;
+}
+
+void llama_file::write_raw(const void * ptr, size_t len) const { pimpl->write_raw_unsafe(ptr, len); }
+void llama_file::write_u32(uint32_t val) const { pimpl->write_raw_unsafe(&val, sizeof(val)); }
+
+size_t llama_file::read_alignment() const { return 1; }
+bool llama_file::has_direct_io() const { return false; }
+
+// llama_mmap
+
+struct llama_mmap::impl {
+    int fd = -1;
+    void * addr = NULL;
+    size_t size = 0;
+
+    impl(const llama_file * file, size_t prefetch, [[maybe_unused]] bool numa) {
+        fd = file->file_id();
+        size = file->size();
+        
+        int prot = PROT_READ;
+        int flags = MAP_SHARED;
+        
+        addr = mmap(NULL, size, prot, flags, fd, 0);
+        if (addr == MAP_FAILED) {
+            throw std::runtime_error(format("mmap failed: %s", strerror(errno)));
+        }
+
+        if (prefetch > 0) {
+            madvise(addr, std::min(prefetch, size), MADV_WILLNEED);
+        }
+    }
+
+    ~impl() {
+        if (addr != NULL && addr != MAP_FAILED) {
+            munmap(addr, size);
+        }
+    }
+};
+
+llama_mmap::llama_mmap(const llama_file * file, size_t prefetch, bool numa) : pimpl(std::make_unique<impl>(file, prefetch, numa)) {}
+llama_mmap::~llama_mmap() = default;
+
+size_t llama_mmap::size() const { return pimpl->size; }
+void * llama_mmap::addr() const { return pimpl->addr; }
+
+void llama_mmap::unmap_fragment(size_t first, size_t last) {
+    if (first > 0) {
+        munmap(pimpl->addr, first);
+    }
+    if (last < pimpl->size) {
+        munmap((uint8_t *)pimpl->addr + last, pimpl->size - last);
+    }
+}
+
+const bool llama_mmap::SUPPORTED = true;
+
+// llama_mlock
+
+static size_t lock_granularity() {
+    long pagesize = sysconf(_SC_PAGESIZE);
+    return pagesize > 0 ? (size_t)pagesize : 4096;
+}
+
+struct llama_mlock::impl {
+    void * addr = NULL;
+    size_t size = 0;
+    bool failed_already = false;
+
+    void init(void * ptr) {
+        addr = ptr;
+        size = 0;
+    }
+
+    void grow_to(size_t target_size) {
+        if (failed_already) {
+            return;
+        }
+        size_t granularity = lock_granularity();
+        target_size = (target_size + granularity - 1) & ~(granularity - 1);
+        if (target_size > size) {
+            if (mlock((uint8_t *)addr + size, target_size - size) == 0) {
+                size = target_size;
+            } else {
+                failed_already = true;
+            }
+        }
+    }
+
+    ~impl() {
+        if (addr != NULL && size > 0) {
+            munlock(addr, size);
+        }
+    }
+};
+
+llama_mlock::llama_mlock() : pimpl(std::make_unique<impl>()) {}
+llama_mlock::~llama_mlock() = default;
+
+void llama_mlock::init(void * ptr) { pimpl->init(ptr); }
+void llama_mlock::grow_to(size_t target_size) { pimpl->grow_to(target_size); }
+
+const bool llama_mlock::SUPPORTED = true;
+
+size_t llama_path_max() {
+    return 4096;  // PATH_MAX on Linux
+}

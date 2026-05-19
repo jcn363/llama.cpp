@@ -59,7 +59,7 @@ set(GGML_BACKEND_DIR "" CACHE PATH "ggml: directory to load dynamic backends fro
 
 # general
 option(GGML_STATIC "ggml: static link libraries"                     OFF)
-option(GGML_NATIVE "ggml: optimize the build for the current system" ON)
+option(GGML_NATIVE "ggml: optimize the build for the current system" OFF)
 option(GGML_LTO    "ggml: enable link time optimization"             OFF)
 option(GGML_CCACHE "ggml: use ccache if available"                   ON)
 
@@ -102,8 +102,6 @@ option(GGML_CPU                             "ggml: enable CPU backend"          
 option(GGML_SCHED_NO_REALLOC                "ggml: disallow reallocations in ggml-alloc (for debugging)" OFF)
 
 # 3rd party libs / backends
-option(GGML_BLAS                            "ggml: use BLAS"                                  OFF)
-set(GGML_BLAS_VENDOR "Generic" CACHE STRING "ggml: BLAS library vendor")
 option(GGML_LLAMAFILE                       "ggml: use LLAMAFILE"                             ${GGML_LLAMAFILE_DEFAULT})
 option(GGML_CUDA                            "ggml: use CUDA"                                  OFF)
 option(GGML_CUDA_FORCE_MMQ                  "ggml: use mmq kernels instead of cuBLAS"         OFF)
@@ -117,30 +115,7 @@ option(GGML_CUDA_GRAPHS                     "ggml: use CUDA graphs (llama.cpp on
 option(GGML_CUDA_NCCL                       "ggml: use NVIDIA Collective Comm. Library"       ON)
 set   (GGML_CUDA_COMPRESSION_MODE "size" CACHE STRING "ggml: cuda link binary compression mode; requires cuda 12.8+")
 set_property(CACHE GGML_CUDA_COMPRESSION_MODE PROPERTY STRINGS "none;speed;balance;size")
-option(GGML_HIP                             "ggml: use HIP"                                   OFF)
-option(GGML_HIP_GRAPHS                      "ggml: use HIP graph"                              ON)
-option(GGML_HIP_RCCL                        "ggml: use ROCm Collective Comm. Library"         OFF)
-option(GGML_HIP_NO_VMM                      "ggml: do not try to use HIP VMM"                 ON)
-option(GGML_HIP_ROCWMMA_FATTN               "ggml: enable rocWMMA for FlashAttention"         OFF)
-option(GGML_HIP_MMQ_MFMA                    "ggml: enable MFMA MMA for CDNA in MMQ"           ON)
-option(GGML_HIP_EXPORT_METRICS              "ggml: enable kernel perf metrics output"         OFF)
-option(GGML_VULKAN                          "ggml: use Vulkan"                                OFF)
-option(GGML_VULKAN_CHECK_RESULTS            "ggml: run Vulkan op checks"                      OFF)
-option(GGML_VULKAN_DEBUG                    "ggml: enable Vulkan debug output"                OFF)
-option(GGML_VULKAN_MEMORY_DEBUG             "ggml: enable Vulkan memory debug output"         OFF)
-option(GGML_VULKAN_SHADER_DEBUG_INFO        "ggml: enable Vulkan shader debug info"           OFF)
-option(GGML_VULKAN_VALIDATE                 "ggml: enable Vulkan validation"                  OFF)
-option(GGML_VULKAN_RUN_TESTS                "ggml: run Vulkan tests"                          OFF)
-option(GGML_RPC                             "ggml: use RPC"                                   OFF)
-option(GGML_OPENCL                          "ggml: use OpenCL"                                OFF)
-option(GGML_OPENCL_PROFILING                "ggml: use OpenCL profiling (increases overhead)" OFF)
-option(GGML_OPENCL_EMBED_KERNELS            "ggml: embed kernels"                             ON)
-option(GGML_OPENCL_USE_ADRENO_KERNELS       "ggml: use optimized kernels for Adreno"          ON)
-set   (GGML_OPENCL_TARGET_VERSION "300" CACHE STRING "ggml: OpenCL API version to target")
 option(GGML_OPENMP                          "ggml: use OpenMP"                                ON)
-
-# toolchain for vulkan-shaders-gen
-set   (GGML_VULKAN_SHADERS_GEN_TOOLCHAIN "" CACHE FILEPATH "ggml: toolchain file for vulkan-shaders-gen")
 
 # extra artifacts
 option(GGML_BUILD_TESTS    "ggml: build tests"    ${GGML_STANDALONE})

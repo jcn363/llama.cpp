@@ -398,30 +398,6 @@ const char * ggml_commit(void) {
 // timing
 //
 
-#if defined(_MSC_VER) || defined(__MINGW32__)
-static int64_t timer_freq, timer_start;
-void ggml_time_init(void) {
-    LARGE_INTEGER t;
-    QueryPerformanceFrequency(&t);
-    timer_freq = t.QuadPart;
-
-    // The multiplication by 1000 or 1000000 below can cause an overflow if timer_freq
-    // and the uptime is high enough.
-    // We subtract the program start time to reduce the likelihood of that happening.
-    QueryPerformanceCounter(&t);
-    timer_start = t.QuadPart;
-}
-int64_t ggml_time_ms(void) {
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
-    return ((t.QuadPart-timer_start) * 1000) / timer_freq;
-}
-int64_t ggml_time_us(void) {
-    LARGE_INTEGER t;
-    QueryPerformanceCounter(&t);
-    return ((t.QuadPart-timer_start) * 1000000) / timer_freq;
-}
-#else
 void ggml_time_init(void) {}
 int64_t ggml_time_ms(void) {
     struct timespec ts;
@@ -434,7 +410,6 @@ int64_t ggml_time_us(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec*1000000 + (int64_t)ts.tv_nsec/1000;
 }
-#endif
 
 int64_t ggml_cycles(void) {
     return clock();
@@ -448,53 +423,11 @@ int64_t ggml_cycles_per_ms(void) {
 // cross-platform UTF-8 file paths
 //
 
-#ifdef _WIN32
-static wchar_t * ggml_mbstowcs(const char * mbs) {
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, mbs, -1, NULL, 0);
-    if (!wlen) {
-        errno = EINVAL;
-        return NULL;
-    }
-
-    wchar_t * wbuf = GGML_MALLOC(wlen * sizeof(wchar_t));
-    wlen = MultiByteToWideChar(CP_UTF8, 0, mbs, -1, wbuf, wlen);
-    if (!wlen) {
-        GGML_FREE(wbuf);
-        errno = EINVAL;
-        return NULL;
-    }
-
-    return wbuf;
-}
-#endif
-
 FILE * ggml_fopen(const char * fname, const char * mode) {
-#ifdef _WIN32
-    FILE * file = NULL;
-
-    // convert fname (UTF-8)
-    wchar_t * wfname = ggml_mbstowcs(fname);
-    if (wfname) {
-        // convert mode (ANSI)
-        wchar_t * wmode = GGML_MALLOC((strlen(mode) + 1) * sizeof(wchar_t));
-        wchar_t * wmode_p = wmode;
-        do {
-            *wmode_p++ = (wchar_t)*mode;
-        } while (*mode++);
-
-        // open file
-        file = _wfopen(wfname, wmode);
-
-        GGML_FREE(wfname);
-        GGML_FREE(wmode);
-    }
-
-    return file;
-#else
     return fopen(fname, mode);
-#endif
-
 }
+
+
 
 static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
     [GGML_TYPE_I8] = {
