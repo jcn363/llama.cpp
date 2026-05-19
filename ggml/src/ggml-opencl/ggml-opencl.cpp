@@ -3756,7 +3756,7 @@ static void transpose_2d(
     CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_int), &rows));
 
     size_t local_size[3] = {64, 1, 1};
-    size_t global_size[3] = {(size_t)stride, (size_t)rows, 1};;
+    size_t global_size[3] = {(size_t)stride, (size_t)rows, 1};
     CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, kernel, 3, NULL,
         global_size, local_size, 0, NULL, NULL));
 
@@ -14875,7 +14875,7 @@ static void ggml_cl_mul_mat_id(ggml_backend_t backend, const ggml_tensor * src0,
             break;
         }
         default:
-            GGML_ASSERT(false && "not implemented");;
+            GGML_ASSERT(false && "not implemented");
     }
 
     int _ne1 = 1;

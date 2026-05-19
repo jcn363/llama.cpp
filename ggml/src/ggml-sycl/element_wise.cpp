@@ -404,7 +404,7 @@ static inline void dispatch_ggml_sycl_op_fused_glu(ggml_backend_sycl_context & c
     SYCL_CHECK(ggml_sycl_set_device(ctx.device));
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
-    const int64_t nc = src1 ? src0->ne[0] : src0->ne[0] / 2;;
+    const int64_t nc = src1 ? src0->ne[0] : src0->ne[0] / 2;
     GGML_ASSERT(dst->ne[0] == nc);
     GGML_ASSERT(ggml_is_contiguous_1(dst->src[0]));
     GGML_ASSERT(ggml_is_contiguous(dst));

@@ -1970,7 +1970,9 @@ static size_t ggml_hexagon_measure_max_vmem(ggml_hexagon_session *sess) {
             sbufs.push_back(new ggml_hexagon_shared_buffer(sess, step, true));
             vmem += step;
         }
-    } catch (...) { }
+    } catch (...) {
+        // Expected: allocation fails when VMEM is exhausted, used to measure total available
+    }
 
     for (auto b : sbufs) { delete b; }
 

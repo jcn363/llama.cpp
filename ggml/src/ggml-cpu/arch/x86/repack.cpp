@@ -2073,7 +2073,7 @@ void ggml_gemm_q4_K_8x8_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const vo
     // Permute mask used for easier vector processing at later stages
     __m256i requiredOrder = _mm256_set_epi32(3, 2, 1, 0, 7, 6, 5, 4);
     int64_t xstart = 0;
-    int anr = nr - nr % 16;; // Used to align nr with boundary of 16
+    int anr = nr - nr % 16; // Used to align nr with boundary of 16
 #if defined(__AVX512BW__) && defined(__AVX512DQ__)
     int anc = nc - nc % 16; // Used to align nc with boundary of 16
     // Mask to mask out nibbles from packed bytes expanded to 512 bit length

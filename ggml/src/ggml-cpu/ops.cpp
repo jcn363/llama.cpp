@@ -5711,7 +5711,7 @@ static void ggml_mrope_cache_init(
                 theta_t = theta_base_t;
             }
             else if (sector == sections[0]) {
-                theta_h = theta_base_h;;
+                theta_h = theta_base_h;
             }
             else if (sector == sec_w) {
                 theta_w = theta_base_w;

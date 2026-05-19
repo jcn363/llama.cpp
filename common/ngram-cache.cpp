@@ -135,7 +135,7 @@ static llama_token try_draft(
             continue;
         }
         if (100*max_count_primary < min_percent[i]*sum_count_primary) {
-            continue;;
+            continue;
         }
         drafted_token = max_token;
     }

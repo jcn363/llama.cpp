@@ -542,7 +542,7 @@ static void binary_job_element_repeat(unsigned int nth, unsigned int ith, void *
 
     const uint32_t src0_type = octx->src[0]->type;
     const uint32_t elem_size_bytes = (src0_type == HTP_TYPE_F32) ? sizeof(float) : sizeof(_Float16);
-    const uint32_t row_size_bytes = ne00 * elem_size_bytes;;
+    const uint32_t row_size_bytes = ne00 * elem_size_bytes;
     const uint32_t total_rows = ne01 * ne02 * ne03;
     const uint32_t start_row  = bctx->nrows_per_thread * ith;
     const uint32_t end_row    = MIN(start_row + bctx->nrows_per_thread, total_rows);

@@ -1305,7 +1305,9 @@ bool value_compare(const value & a, const value & b, value_compare_op op) {
                 } else {
                     throw std::runtime_error("Unsupported comparison operator for numeric types");
                 }
-            } catch (...) {}
+            } catch (...) {
+                // Conversion failed, fall through to string comparison
+            }
         }
         // compare string and number
         // TODO: not sure if this is the right behavior
@@ -1326,7 +1328,9 @@ bool value_compare(const value & a, const value & b, value_compare_op op) {
                 } else {
                     throw std::runtime_error("Unsupported comparison operator for string/number types");
                 }
-            } catch (...) {}
+            } catch (...) {
+                // Conversion failed, fall through to boolean comparison
+            }
         }
         // compare boolean simple
         if (is_val<value_bool>(a) && is_val<value_bool>(b)) {

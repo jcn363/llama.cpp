@@ -236,7 +236,7 @@ caps caps_get(jinja::program & prog) {
                 result.supports_tools = false;
             }
 
-            auto & tool_calls = messages->at(1)->at("tool_calls");;
+            auto & tool_calls = messages->at(1)->at("tool_calls");
             caps_print_stats(tool_calls, "messages[1].tool_calls");
             if (!tool_calls->stats.used) {
                 result.supports_tool_calls = false;

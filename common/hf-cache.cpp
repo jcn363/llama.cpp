@@ -218,7 +218,9 @@ static nl::json api_get(const std::string & url,
         }
         try {
             body = nl::json::parse(res->body)["error"].get<std::string>();
-        } catch (...) { }
+        } catch (...) {
+            // Failed to parse error JSON, fall back to raw body
+        }
 
         throw std::runtime_error("GET failed (" + std::to_string(res->status) + "): " + body);
     } else {
