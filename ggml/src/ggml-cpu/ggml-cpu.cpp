@@ -18,24 +18,7 @@
 #    include "kleidiai/kleidiai.h"
 #endif
 
-#ifdef GGML_USE_CPU_RISCV64_SPACEMIT
-#    include "spacemit/ime.h"
-#endif
-
-#if defined(_WIN32)
-#    define WIN32_LEAN_AND_MEAN
-#    ifndef NOMINMAX
-#        define NOMINMAX
-#    endif
-#    include <windows.h>
-#else
-#    include <unistd.h>
-#endif
-
-#if defined(__APPLE__)
-#    include <sys/sysctl.h>
-#    include <sys/types.h>
-#endif
+#include <unistd.h>
 
 // ggml-backend interface
 
@@ -46,12 +29,6 @@ std::vector<ggml_backend_buffer_type_t> & ggml_backend_cpu_get_extra_buffer_type
 #if defined(__AMX_INT8__) && defined(__AVX512VNNI__)
         if (ggml_backend_amx_buffer_type()) {
             bufts.push_back(ggml_backend_amx_buffer_type());
-        }
-#endif
-
-#ifdef GGML_USE_CPU_RISCV64_SPACEMIT
-        if (ggml_backend_cpu_riscv64_spacemit_buffer_type()) {
-            bufts.push_back(ggml_backend_cpu_riscv64_spacemit_buffer_type());
         }
 #endif
 
@@ -290,13 +267,6 @@ struct ggml_backend_cpu_device_context {
     std::string description = "CPU";
 
     ggml_backend_cpu_device_context() {
-#ifdef __APPLE__
-        size_t len = 0;
-        if (!sysctlbyname("machdep.cpu.brand_string", NULL, &len, NULL, 0)) {
-            description.resize(len);
-            sysctlbyname("machdep.cpu.brand_string", &description[0], &len, NULL, 0); // NOLINT
-        }
-#elif defined(__linux__)
         FILE * f = fopen("/proc/cpuinfo", "r");
         if (f) {
             char buf[1024];
@@ -318,35 +288,6 @@ struct ggml_backend_cpu_device_context {
             }
             fclose(f);
         }
-#elif defined(_WIN32)
-        HKEY hKey;
-        if (RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-                        TEXT("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"),
-                        0,
-                        KEY_READ,
-                        &hKey) == ERROR_SUCCESS) {
-            DWORD cpu_brand_size = 0;
-            if (RegQueryValueExA(hKey,
-                                "ProcessorNameString",
-                                NULL,
-                                NULL,
-                                NULL,
-                                &cpu_brand_size) == ERROR_SUCCESS) {
-                description.resize(cpu_brand_size);
-                if (RegQueryValueExA(hKey,
-                                    "ProcessorNameString",
-                                    NULL,
-                                    NULL,
-                                    (LPBYTE)&description[0], // NOLINT
-                                    &cpu_brand_size) == ERROR_SUCCESS) {
-                    if (description.find('\0') != std::string::npos) {
-                        description.resize(description.find('\0'));
-                    }
-                }
-            }
-            RegCloseKey(hKey);
-        }
-#endif
     }
 };
 
@@ -363,20 +304,12 @@ static const char * ggml_backend_cpu_device_get_description(ggml_backend_dev_t d
 }
 
 static void ggml_backend_cpu_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
-#ifdef _WIN32
-    MEMORYSTATUSEX status;
-    status.dwLength = sizeof(status);
-    GlobalMemoryStatusEx(&status);
-    *total = status.ullTotalPhys;
-    *free = status.ullAvailPhys;
-#else
     long pages = sysconf(_SC_PHYS_PAGES);
     long page_size = sysconf(_SC_PAGE_SIZE);
     *total = pages * page_size;
 
     // "free" system memory is ill-defined, for practical purposes assume that all of it is free:
     *free = *total;
-#endif // _WIN32
 
     GGML_UNUSED(dev);
 }
@@ -613,9 +546,6 @@ static ggml_backend_feature * ggml_backend_cpu_get_features(ggml_backend_reg_t r
         if (ggml_cpu_has_llamafile()) {
             features.push_back({ "LLAMAFILE", "1" });
         }
-    #ifdef GGML_USE_ACCELERATE
-        features.push_back({ "ACCELERATE", "1" });
-    #endif
     #ifdef GGML_USE_CPU_HBM
         features.push_back({ "CPU_HBM", "1" });
     #endif
