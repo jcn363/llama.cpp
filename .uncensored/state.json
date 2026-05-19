@@ -1,9 +1,9 @@
 {
   "session_id": "hardware-optimization-2026-05-19",
   "created_at": "2026-05-19T00:00:00Z",
-  "updated_at": "2026-05-19T00:00:00Z",
+  "updated_at": "2026-05-19T12:00:00Z",
   "context": {
-    "goal": "Optimize codebase for current hardware",
+    "goal": "Clean up codebase for AMD64 Linux only, optimize for current hardware, add fork remote, create Rust migration plan",
     "completed": [
       "Detected hardware: AMD Opteron 3280 (bdver1, 8 cores, 32GB RAM) + GTX 1050 (2GB VRAM)",
       "CPU features: SSE4.2, AVX, AES, POPCNT (NO AVX2, FMA, F16C, BMI2, AVX512)",
@@ -11,11 +11,22 @@
       "Disabled AVX2, FMA, F16C, BMI2 in ggml/CMakeLists.txt (not supported by CPU)",
       "Enabled CUDA backend for GTX 1050 acceleration",
       "Verified clean build with CUDA support",
-      "Committed as 45b71b4fc"
+      "Committed as 45b71b4fc",
+      "Removed non-Linux/AMD64 toolchain files (arm64-*, riscv64-*, x64-windows-*)",
+      "Removed examples/llama.android/ and build-xcframework.sh",
+      "Removed 11 platform-specific CI workflows",
+      "Removed 4 platform-specific Dockerfiles",
+      "Updated CMakePresets.json: kept only x64-linux presets",
+      "Stripped platform conditionals from ggml.c, gguf.cpp",
+      "Updated CMake files: common.cmake, tests/CMakeLists.txt, tools/CMakeLists.txt, examples/CMakeLists.txt, pocs/CMakeLists.txt, common/CMakeLists.txt",
+      "Verified ggml library builds successfully after cleanup",
+      "Created fork at https://github.com/jcn363/llama.cpp",
+      "Pushed cleanup commit 87b758afe to fork",
+      "Created Rust migration plan at docs/RUST_MIGRATION_PLAN.md"
     ],
     "pending": [],
     "failed": [],
-    "notes": "Build optimized for AMD Opteron 3280 (bdver1) + GTX 1050"
+    "notes": "Build optimized for AMD Opteron 3280 (bdver1) + GTX 1050. Codebase cleaned for AMD64 Linux only. 89 files changed, 6209 lines removed. Rust migration plan created: 8 phases, ~52 weeks estimated."
   },
   "memory": {
     "key_facts": [
@@ -23,22 +34,66 @@
       "GPU: NVIDIA GTX 1050, 2GB VRAM, CUDA 12.0, compute 6.1",
       "CPU supports: SSE4.2, AVX, AES, POPCNT",
       "CPU does NOT support: AVX2, FMA, F16C, BMI2, AVX512",
-      "CUDA backend enabled for GPU acceleration"
+      "CUDA backend enabled for GPU acceleration",
+      "Codebase: 503 C/C++ files, 189 Python files, ~285K lines of C/C++",
+      "Fork: https://github.com/jcn363/llama.cpp"
     ],
     "decisions": [
       "Disabled AVX2/FMA/F16C/BMI2 in CMake defaults (not supported by bdver1)",
       "Enabled CUDA for GTX 1050 (compute capability 6.1)",
-      "Kept -march=native for automatic CPU feature detection"
+      "Kept -march=native for automatic CPU feature detection",
+      "Removed all non-AMD64 Linux platform support from build system",
+      "Rust migration planned as 8-phase, ~52 week effort"
     ],
     "learnings": [
       "AMD Opteron 3280 is Bulldozer architecture (bdver1)",
       "Bulldozer has AVX but not AVX2 or FMA",
-      "GTX 1050 has compute capability 6.1 (Pascal architecture)"
+      "GTX 1050 has compute capability 6.1 (Pascal architecture)",
+      "ggml library builds successfully after platform cleanup"
     ]
   },
   "files": {
-    "modified": ["ggml/CMakeLists.txt", ".uncensored/state.json"],
-    "created": [],
-    "deleted": []
+    "modified": [
+      "ggml/CMakeLists.txt",
+      "CMakePresets.json",
+      "cmake/common.cmake",
+      "ggml/cmake/common.cmake",
+      "common/CMakeLists.txt",
+      "examples/CMakeLists.txt",
+      "tests/CMakeLists.txt",
+      "tools/CMakeLists.txt",
+      "pocs/CMakeLists.txt",
+      "ggml/src/ggml.c",
+      "ggml/src/gguf.cpp",
+      ".uncensored/state.json",
+      ".uncensored/MEMORY.md"
+    ],
+    "created": [
+      "docs/RUST_MIGRATION_PLAN.md"
+    ],
+    "deleted": [
+      "cmake/arm64-apple-clang.cmake",
+      "cmake/arm64-windows-llvm.cmake",
+      "cmake/arm64-linux-clang.cmake",
+      "cmake/riscv64-spacemit-linux-gnu-gcc.cmake",
+      "cmake/x64-windows-llvm.cmake",
+      "build-xcframework.sh",
+      "examples/llama.android/",
+      ".github/workflows/build-android.yml",
+      ".github/workflows/build-apple.yml",
+      ".github/workflows/build-msys.yml",
+      ".github/workflows/build-riscv.yml",
+      ".github/workflows/build-and-test-snapdragon.yml",
+      ".github/workflows/build-cross.yml",
+      ".github/workflows/winget.yml",
+      ".github/workflows/build-vulkan.yml",
+      ".github/workflows/build-sycl.yml",
+      ".github/workflows/build-openvino.yml",
+      ".github/workflows/build-cann.yml",
+      ".devops/s390x.Dockerfile",
+      ".devops/musa.Dockerfile",
+      ".devops/cann.Dockerfile",
+      ".devops/llama-cli-cann.Dockerfile"
+    ]
   }
 }
