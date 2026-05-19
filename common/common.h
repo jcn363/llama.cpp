@@ -15,15 +15,7 @@
 #include <map>
 #include <algorithm>
 
-#if defined(_WIN32) && !defined(_WIN32_WINNT)
-#define _WIN32_WINNT 0x0A00
-#endif
-
-#ifdef _WIN32
-#define DIRECTORY_SEPARATOR '\\'
-#else
 #define DIRECTORY_SEPARATOR '/'
-#endif // _WIN32
 
 #define die(msg)          do { fputs("error: " msg "\n", stderr);                exit(1); } while (0)
 #define die_fmt(fmt, ...) do { fprintf(stderr, "error: " fmt "\n", __VA_ARGS__); exit(1); } while (0)

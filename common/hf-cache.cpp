@@ -17,18 +17,9 @@
 
 namespace nl = nlohmann;
 
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#define HOME_DIR "USERPROFILE"
-#include <windows.h>
-#else
 #define HOME_DIR "HOME"
 #include <unistd.h>
 #include <pwd.h>
-#endif
 
 namespace hf_cache {
 
@@ -53,13 +44,11 @@ static fs::path get_cache_directory() {
                 return entry.path.empty() ? base : base / entry.path;
             }
         }
-#ifndef _WIN32
         const struct passwd * pw = getpwuid(getuid());
 
         if (pw && pw->pw_dir && *pw->pw_dir) {
             return fs::path(pw->pw_dir) / ".cache" / "huggingface" / "hub";
         }
-#endif
         throw std::runtime_error("Failed to determine HF cache directory");
     }();
 

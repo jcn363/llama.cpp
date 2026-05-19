@@ -12,14 +12,7 @@
 #include <thread>
 #include <vector>
 
-#if defined(_WIN32)
-#    include <io.h>
-#    include <windows.h>
-#    define isatty _isatty
-#    define fileno _fileno
-#else
-#    include <unistd.h>
-#endif // defined(_WIN32)
+#include <unistd.h>
 
 int common_log_verbosity_thold = LOG_DEFAULT_LLAMA;
 

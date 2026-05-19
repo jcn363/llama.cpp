@@ -29,35 +29,11 @@
 #include <unordered_set>
 #include <vector>
 
-#if defined(__APPLE__) && defined(__MACH__)
-#include <sys/types.h>
-#include <sys/sysctl.h>
-#endif
-
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#   define NOMINMAX
-#endif
-#include <locale>
-#include <windows.h>
-#include <string.h>
-#include <fcntl.h>
-#include <io.h>
-#else
 #include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <unistd.h>
-#endif
-
-#if defined(__linux__)
 #include <sys/types.h>
 #include <pwd.h>
-#endif
-
-#if defined(_MSC_VER)
-#pragma warning(disable: 4244 4267) // possible loss of data
-#endif
+#include <unistd.h>
 
 common_time_meas::common_time_meas(int64_t & t_acc, bool disable) : t_start_us(disable ? -1 : ggml_time_us()), t_acc(t_acc) {}
 
@@ -72,7 +48,6 @@ common_time_meas::~common_time_meas() {
 //
 
 int32_t common_cpu_get_num_physical_cores() {
-#ifdef __linux__
     // enumerate the set of thread siblings, num entries is num cores
     std::unordered_set<std::string> siblings;
     for (uint32_t cpu=0; cpu < UINT32_MAX; ++cpu) {
@@ -89,46 +64,6 @@ int32_t common_cpu_get_num_physical_cores() {
     if (!siblings.empty()) {
         return static_cast<int32_t>(siblings.size());
     }
-#elif defined(__APPLE__) && defined(__MACH__)
-    int32_t num_physical_cores;
-    size_t len = sizeof(num_physical_cores);
-    int result = sysctlbyname("hw.perflevel0.physicalcpu", &num_physical_cores, &len, NULL, 0);
-    if (result == 0) {
-        return num_physical_cores;
-    }
-    result = sysctlbyname("hw.physicalcpu", &num_physical_cores, &len, NULL, 0);
-    if (result == 0) {
-        return num_physical_cores;
-    }
-#elif defined(_WIN32) && (_WIN32_WINNT >= 0x0601) && !defined(__MINGW64__) // windows 7 and later
-    // TODO: windows + arm64 + mingw64
-    unsigned int n_threads_win = std::thread::hardware_concurrency();
-    unsigned int default_threads = n_threads_win > 0 ? (n_threads_win <= 4 ? n_threads_win : n_threads_win / 2) : 4;
-
-    DWORD buffer_size = 0;
-    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &buffer_size)) {
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
-            return default_threads;
-        }
-    }
-
-    std::vector<char> buffer(buffer_size);
-    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()), &buffer_size)) {
-        return default_threads;
-    }
-
-    int32_t num_physical_cores = 0;
-    PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data());
-    while (buffer_size > 0) {
-        if (info->Relationship == RelationProcessorCore) {
-            num_physical_cores += info->Processor.GroupCount;
-        }
-        buffer_size -= info->Size;
-        info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(reinterpret_cast<char*>(info) + info->Size);
-    }
-
-    return num_physical_cores > 0 ? num_physical_cores : default_threads;
-#endif
     unsigned int n_threads = std::thread::hardware_concurrency();
     return n_threads > 0 ? (n_threads <= 4 ? n_threads : n_threads / 2) : 4;
 }
@@ -208,31 +143,6 @@ int32_t common_cpu_get_num_math() {
 
 // Helper for setting process priority
 
-#if defined(_WIN32)
-
-bool set_process_priority(enum ggml_sched_priority prio) {
-    if (prio == GGML_SCHED_PRIO_NORMAL) {
-        return true;
-    }
-
-    DWORD p = NORMAL_PRIORITY_CLASS;
-    switch (prio) {
-        case GGML_SCHED_PRIO_LOW:      p = BELOW_NORMAL_PRIORITY_CLASS; break;
-        case GGML_SCHED_PRIO_NORMAL:   p = NORMAL_PRIORITY_CLASS;       break;
-        case GGML_SCHED_PRIO_MEDIUM:   p = ABOVE_NORMAL_PRIORITY_CLASS; break;
-        case GGML_SCHED_PRIO_HIGH:     p = HIGH_PRIORITY_CLASS;         break;
-        case GGML_SCHED_PRIO_REALTIME: p = REALTIME_PRIORITY_CLASS;     break;
-    }
-
-    if (!SetPriorityClass(GetCurrentProcess(), p)) {
-        LOG_WRN("failed to set process priority class %d : (%d)\n", prio, (int) GetLastError());
-        return false;
-    }
-
-    return true;
-}
-
-#else // MacOS and POSIX
 #include <sys/types.h>
 #include <sys/resource.h>
 
@@ -256,8 +166,6 @@ bool set_process_priority(enum ggml_sched_priority prio) {
     }
     return true;
 }
-
-#endif
 
 //
 // CLI argument parsing
@@ -362,11 +270,6 @@ bool parse_cpu_mask(const std::string & mask, bool (&boolmask)[GGML_MAX_N_THREAD
 }
 
 void common_init() {
-#if defined(_WIN32)
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-#endif
-
     common_log_set_prefix(common_log_main(), true);
     common_log_set_timestamps(common_log_main(), true);
 
@@ -403,13 +306,7 @@ std::string common_params_get_system_info(const common_params & params) {
     if (params.cpuparams_batch.n_threads != -1) {
         os << " (n_threads_batch = " << params.cpuparams_batch.n_threads << ")";
     }
-#if defined(_WIN32) && (_WIN32_WINNT >= 0x0601) && !defined(__MINGW64__) // windows 7 and later
-    // TODO: windows + arm64 + mingw64
-    DWORD logicalProcessorCount = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-    os << " / " << logicalProcessorCount << " | " << llama_print_system_info();
-#else
     os << " / " << std::thread::hardware_concurrency() << " | " << llama_print_system_info();
-#endif
 
     return os.str();
 }
@@ -853,71 +750,8 @@ bool fs_validate_filename(const std::string & filename, bool allow_subdirs) {
     return true;
 }
 
-#include <iostream>
-
-
-#ifdef _WIN32
-static std::wstring utf8_to_wstring(const std::string & str) {
-    if (str.empty()) {
-        return std::wstring();
-    }
-
-    int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), NULL, 0);
-
-    if (size <= 0) {
-        return std::wstring();
-    }
-
-    std::wstring wstr(size, 0);
-    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &wstr[0], size);
-
-    return wstr;
-}
-#endif
-
 // returns true if successful, false otherwise
 bool fs_create_directory_with_parents(const std::string & path) {
-#ifdef _WIN32
-    std::wstring wpath = utf8_to_wstring(path);
-
-    // if the path already exists, check whether it's a directory
-    const DWORD attributes = GetFileAttributesW(wpath.c_str());
-    if ((attributes != INVALID_FILE_ATTRIBUTES) && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-        return true;
-    }
-
-    size_t pos_slash = 0;
-
-    // process path from front to back, procedurally creating directories
-    while ((pos_slash = path.find('\\', pos_slash)) != std::string::npos) {
-        const std::wstring subpath = wpath.substr(0, pos_slash);
-
-        pos_slash += 1;
-
-        // skip the drive letter, in some systems it can return an access denied error
-        if (subpath.length() == 2 && subpath[1] == ':') {
-            continue;
-        }
-
-        const bool success = CreateDirectoryW(subpath.c_str(), NULL);
-
-        if (!success) {
-            const DWORD error = GetLastError();
-
-            // if the path already exists, ensure that it's a directory
-            if (error == ERROR_ALREADY_EXISTS) {
-                const DWORD attributes = GetFileAttributesW(subpath.c_str());
-                if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-    }
-
-    return true;
-#else
     // if the path already exists, check whether it's a directory
     struct stat info;
     if (stat(path.c_str(), &info) == 0) {
@@ -948,7 +782,6 @@ bool fs_create_directory_with_parents(const std::string & path) {
     }
 
     return true;
-#endif // _WIN32
 }
 
 bool fs_is_directory(const std::string & path) {
@@ -968,14 +801,11 @@ std::string fs_get_cache_directory() {
     if (getenv("LLAMA_CACHE")) {
         cache_directory = std::getenv("LLAMA_CACHE");
     } else {
-#if defined(__linux__) || defined(__FreeBSD__) || defined(_AIX) || \
-        defined(__OpenBSD__) || defined(__NetBSD__)
         if (std::getenv("XDG_CACHE_HOME")) {
             cache_directory = std::getenv("XDG_CACHE_HOME");
         } else if (std::getenv("HOME")) {
             cache_directory = std::getenv("HOME") + std::string("/.cache/");
         } else {
-#if defined(__linux__)
             /* no $HOME is defined, fallback to getpwuid */
             struct passwd *pw = getpwuid(getuid());
             if ((!pw) || (!pw->pw_dir)) {
@@ -983,19 +813,7 @@ std::string fs_get_cache_directory() {
             }
 
             cache_directory = std::string(pw->pw_dir) + std::string("/.cache/");
-#else /* defined(__linux__) */
-            throw std::runtime_error("Failed to find $HOME directory");
-#endif /* defined(__linux__) */
         }
-#elif defined(__APPLE__)
-        cache_directory = std::getenv("HOME") + std::string("/Library/Caches/");
-#elif defined(_WIN32)
-        cache_directory = std::getenv("LOCALAPPDATA");
-#elif defined(__EMSCRIPTEN__)
-        GGML_ABORT("not implemented on this platform");
-#else
-#  error Unknown architecture
-#endif
         cache_directory = ensure_trailing_slash(cache_directory);
         cache_directory += "llama.cpp";
     }

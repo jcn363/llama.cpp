@@ -12,18 +12,6 @@
 #include <thread>
 #include <stdarg.h>
 
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <fcntl.h>
-#include <io.h>
-#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
-#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
-#endif
-#else
 #include <climits>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -32,7 +20,6 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <termios.h>
-#endif
 
 #define ANSI_COLOR_RED     "\x1b[31m"
 #define ANSI_COLOR_GREEN   "\x1b[32m"
@@ -46,39 +33,13 @@
 
 namespace console {
 
-#if defined (_WIN32)
-    namespace {
-        // Use private-use unicode values to represent special keys that are not reported
-        // as characters (e.g. arrows on Windows). These values should never clash with
-        // real input and let the rest of the code handle navigation uniformly.
-        static constexpr char32_t KEY_ARROW_LEFT       = 0xE000;
-        static constexpr char32_t KEY_ARROW_RIGHT      = 0xE001;
-        static constexpr char32_t KEY_ARROW_UP         = 0xE002;
-        static constexpr char32_t KEY_ARROW_DOWN       = 0xE003;
-        static constexpr char32_t KEY_HOME             = 0xE004;
-        static constexpr char32_t KEY_END              = 0xE005;
-        static constexpr char32_t KEY_CTRL_ARROW_LEFT  = 0xE006;
-        static constexpr char32_t KEY_CTRL_ARROW_RIGHT = 0xE007;
-        static constexpr char32_t KEY_DELETE           = 0xE008;
-    }
-
-    //
-    // Console state
-    //
-#endif
-
     static bool         advanced_display = false;
     static bool         simple_io        = true;
     static display_type current_display  = DISPLAY_TYPE_RESET;
 
     static FILE*        out              = stdout;
-
-#if defined (_WIN32)
-    static void*        hConsole;
-#else
     static FILE*        tty              = nullptr;
     static termios      initial_state;
-#endif
 
     static completion_callback completion_cb = nullptr;
 
@@ -89,45 +50,7 @@ namespace console {
     void init(bool use_simple_io, bool use_advanced_display) {
         advanced_display = use_advanced_display;
         simple_io = use_simple_io;
-#if defined(_WIN32)
-        // Windows-specific console initialization
-        DWORD dwMode = 0;
-        hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (hConsole == INVALID_HANDLE_VALUE || !GetConsoleMode(hConsole, &dwMode)) {
-            hConsole = GetStdHandle(STD_ERROR_HANDLE);
-            if (hConsole != INVALID_HANDLE_VALUE && (!GetConsoleMode(hConsole, &dwMode))) {
-                hConsole = nullptr;
-                simple_io = true;
-            }
-        }
-        if (hConsole) {
-            // Check conditions combined to reduce nesting
-            if (advanced_display && !(dwMode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) &&
-                !SetConsoleMode(hConsole, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
-                advanced_display = false;
-            }
-            // Set console output codepage to UTF8
-            SetConsoleOutputCP(CP_UTF8);
-        }
-        HANDLE hConIn = GetStdHandle(STD_INPUT_HANDLE);
-        if (hConIn != INVALID_HANDLE_VALUE && GetConsoleMode(hConIn, &dwMode)) {
-            // Set console input codepage to UTF16
-            _setmode(_fileno(stdin), _O_WTEXT);
 
-            // Set ICANON (ENABLE_LINE_INPUT) and ECHO (ENABLE_ECHO_INPUT)
-            if (simple_io) {
-                dwMode |= ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT;
-            } else {
-                dwMode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
-            }
-            if (!SetConsoleMode(hConIn, dwMode)) {
-                simple_io = true;
-            }
-        }
-        if (simple_io) {
-            _setmode(_fileno(stdin), _O_U8TEXT);
-        }
-#else
         // POSIX-specific console initialization
         if (!simple_io) {
             struct termios new_termios;
@@ -145,14 +68,12 @@ namespace console {
         }
 
         setlocale(LC_ALL, "");
-#endif
     }
 
     void cleanup() {
         // Reset console display
         set_display(DISPLAY_TYPE_RESET);
 
-#if !defined(_WIN32)
         // Restore settings on POSIX systems
         if (!simple_io) {
             if (tty != nullptr) {
@@ -162,7 +83,6 @@ namespace console {
             }
             tcsetattr(STDIN_FILENO, TCSANOW, &initial_state);
         }
-#endif
     }
 
     //
@@ -198,49 +118,6 @@ namespace console {
     }
 
     static char32_t getchar32() {
-#if defined(_WIN32)
-        HANDLE hConsole = GetStdHandle(STD_INPUT_HANDLE);
-        wchar_t high_surrogate = 0;
-
-        while (true) {
-            INPUT_RECORD record;
-            DWORD count;
-            if (!ReadConsoleInputW(hConsole, &record, 1, &count) || count == 0) {
-                return WEOF;
-            }
-
-            if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown) {
-                wchar_t wc = record.Event.KeyEvent.uChar.UnicodeChar;
-                if (wc == 0) {
-                    const DWORD ctrl_mask = LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED;
-                    const bool ctrl_pressed = (record.Event.KeyEvent.dwControlKeyState & ctrl_mask) != 0;
-                    switch (record.Event.KeyEvent.wVirtualKeyCode) {
-                        case VK_LEFT:   return ctrl_pressed ? KEY_CTRL_ARROW_LEFT  : KEY_ARROW_LEFT;
-                        case VK_RIGHT:  return ctrl_pressed ? KEY_CTRL_ARROW_RIGHT : KEY_ARROW_RIGHT;
-                        case VK_UP:     return KEY_ARROW_UP;
-                        case VK_DOWN:   return KEY_ARROW_DOWN;
-                        case VK_HOME:   return KEY_HOME;
-                        case VK_END:    return KEY_END;
-                        case VK_DELETE: return KEY_DELETE;
-                        default:        continue;
-                    }
-                }
-
-                if ((wc >= 0xD800) && (wc <= 0xDBFF)) { // Check if wc is a high surrogate
-                    high_surrogate = wc;
-                    continue;
-                }
-                if ((wc >= 0xDC00) && (wc <= 0xDFFF)) { // Check if wc is a low surrogate
-                    if (high_surrogate != 0) { // Check if we have a high surrogate
-                        return ((high_surrogate - 0xD800) << 10) + (wc - 0xDC00) + 0x10000;
-                    }
-                }
-
-                high_surrogate = 0; // Reset the high surrogate
-                return static_cast<char32_t>(wc);
-            }
-        }
-#else
         wchar_t wc = getwchar();
         if (static_cast<wint_t>(wc) == WEOF) {
             return WEOF;
@@ -259,66 +136,17 @@ namespace console {
 #endif
 
         return static_cast<char32_t>(wc);
-#endif
     }
 
     static void pop_cursor() {
-#if defined(_WIN32)
-        if (hConsole != NULL) {
-            CONSOLE_SCREEN_BUFFER_INFO bufferInfo;
-            GetConsoleScreenBufferInfo(hConsole, &bufferInfo);
-
-            COORD newCursorPosition = bufferInfo.dwCursorPosition;
-            if (newCursorPosition.X == 0) {
-                newCursorPosition.X = bufferInfo.dwSize.X - 1;
-                newCursorPosition.Y -= 1;
-            } else {
-                newCursorPosition.X -= 1;
-            }
-
-            SetConsoleCursorPosition(hConsole, newCursorPosition);
-            return;
-        }
-#endif
         putc('\b', out);
     }
 
     static int estimateWidth(char32_t codepoint) {
-#if defined(_WIN32)
-        (void)codepoint;
-        return 1;
-#else
         return wcwidth(codepoint);
-#endif
     }
 
     static int put_codepoint(const char* utf8_codepoint, size_t length, int expectedWidth) {
-#if defined(_WIN32)
-        CONSOLE_SCREEN_BUFFER_INFO bufferInfo;
-        if (!GetConsoleScreenBufferInfo(hConsole, &bufferInfo)) {
-            // go with the default
-            return expectedWidth;
-        }
-        COORD initialPosition = bufferInfo.dwCursorPosition;
-        DWORD nNumberOfChars = length;
-        WriteConsole(hConsole, utf8_codepoint, nNumberOfChars, &nNumberOfChars, NULL);
-
-        CONSOLE_SCREEN_BUFFER_INFO newBufferInfo;
-        GetConsoleScreenBufferInfo(hConsole, &newBufferInfo);
-
-        // Figure out our real position if we're in the last column
-        if (utf8_codepoint[0] != 0x09 && initialPosition.X == newBufferInfo.dwSize.X - 1) {
-            DWORD nNumberOfChars;
-            WriteConsole(hConsole, &" \b", 2, &nNumberOfChars, NULL);
-            GetConsoleScreenBufferInfo(hConsole, &newBufferInfo);
-        }
-
-        int width = newBufferInfo.dwCursorPosition.X - initialPosition.X;
-        if (width < 0) {
-            width += newBufferInfo.dwSize.X;
-        }
-        return width;
-#else
         // We can trust expectedWidth if we've got one
         if (expectedWidth >= 0 || tty == nullptr) {
             fwrite(utf8_codepoint, length, 1, out);
@@ -350,16 +178,10 @@ namespace console {
             width += w.ws_col;
         }
         return width;
-#endif
     }
 
     static void replace_last(char ch) {
-#if defined(_WIN32)
-        pop_cursor();
-        put_codepoint(&ch, 1, 1);
-#else
         fprintf(out, "\b%c", ch);
-#endif
     }
 
     static char32_t decode_utf8(const std::string & input, size_t pos, size_t & advance) {
@@ -665,35 +487,11 @@ namespace console {
 
     static void move_cursor(int delta) {
         if (delta == 0) return;
-#if defined(_WIN32)
-        if (hConsole != NULL) {
-            CONSOLE_SCREEN_BUFFER_INFO bufferInfo;
-            GetConsoleScreenBufferInfo(hConsole, &bufferInfo);
-            COORD newCursorPosition = bufferInfo.dwCursorPosition;
-            int width = bufferInfo.dwSize.X;
-            int newX = newCursorPosition.X + delta;
-            int newY = newCursorPosition.Y;
-
-            while (newX >= width) {
-                newX -= width;
-                newY++;
-            }
-            while (newX < 0) {
-                newX += width;
-                newY--;
-            }
-
-            newCursorPosition.X = newX;
-            newCursorPosition.Y = newY;
-            SetConsoleCursorPosition(hConsole, newCursorPosition);
-        }
-#else
         if (delta < 0) {
             for (int i = 0; i < -delta; i++) fprintf(out, "\b");
         } else {
             for (int i = 0; i < delta; i++) fprintf(out, "\033[C");
         }
-#endif
     }
 
     struct history_t {
@@ -892,40 +690,6 @@ namespace console {
                         }
                     }
                 }
-#if defined(_WIN32)
-            } else if (input_char == KEY_ARROW_LEFT) {
-                if (char_pos > 0) {
-                    int w = widths[char_pos - 1];
-                    move_cursor(-w);
-                    char_pos--;
-                    byte_pos = prev_utf8_char_pos(line, byte_pos);
-                }
-            } else if (input_char == KEY_ARROW_RIGHT) {
-                if (char_pos < widths.size()) {
-                    int w = widths[char_pos];
-                    move_cursor(w);
-                    char_pos++;
-                    byte_pos = next_utf8_char_pos(line, byte_pos);
-                }
-            } else if (input_char == KEY_CTRL_ARROW_LEFT) {
-                move_word_left(char_pos, byte_pos, widths, line);
-            } else if (input_char == KEY_CTRL_ARROW_RIGHT) {
-                move_word_right(char_pos, byte_pos, widths, line);
-            } else if (input_char == KEY_HOME) {
-                move_to_line_start(char_pos, byte_pos, widths);
-            } else if (input_char == KEY_END) {
-                move_to_line_end(char_pos, byte_pos, widths, line);
-            } else if (input_char == KEY_DELETE) {
-                delete_at_cursor(line, widths, char_pos, byte_pos);
-            } else if (input_char == KEY_ARROW_UP || input_char == KEY_ARROW_DOWN) {
-                if (input_char == KEY_ARROW_UP) {
-                    history_prev();
-                    is_special_char = false;
-                } else if (input_char == KEY_ARROW_DOWN) {
-                    history_next();
-                    is_special_char = false;
-                }
-#endif
             } else if (input_char == 0x08 || input_char == 0x7F) { // Backspace
                 if (char_pos > 0) {
                     int w = widths[char_pos - 1];
@@ -1044,25 +808,11 @@ namespace console {
     }
 
     static bool readline_simple(std::string & line, bool multiline_input) {
-#if defined(_WIN32)
-        std::wstring wline;
-        if (!std::getline(std::wcin, wline)) {
-            // Input stream is bad or EOF received
-            line.clear();
-            GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
-            return false;
-        }
-
-        int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wline[0], (int)wline.size(), NULL, 0, NULL, NULL);
-        line.resize(size_needed);
-        WideCharToMultiByte(CP_UTF8, 0, &wline[0], (int)wline.size(), &line[0], size_needed, NULL, NULL);
-#else
         if (!std::getline(std::cin, line)) {
             // Input stream is bad or EOF received
             line.clear();
             return false;
         }
-#endif
         if (!line.empty()) {
             char last = line.back();
             if (last == '/') { // Always return control on '/' symbol

@@ -23,26 +23,10 @@
 
 #include "http.h"
 
-#ifndef __EMSCRIPTEN__
-#ifdef __linux__
 #include <linux/limits.h>
-#elif defined(_WIN32)
-#   if !defined(PATH_MAX)
-#   define PATH_MAX MAX_PATH
-#   endif
-#elif defined(_AIX)
-#include <sys/limits.h>
-#else
-#include <sys/syslimits.h>
-#endif
-#endif
 
 // isatty
-#if defined(_WIN32)
-#include <io.h>
-#else
 #include <unistd.h>
-#endif
 
 using json = nlohmann::ordered_json;
 
