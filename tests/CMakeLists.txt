@@ -135,22 +135,19 @@ llama_test(test-tokenizer-0 NAME test-tokenizer-0-qwen35            ARGS ${PROJE
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-refact            ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-refact.gguf)
 llama_test(test-tokenizer-0 NAME test-tokenizer-0-starcoder         ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-starcoder.gguf)
 
-if (NOT WIN32)
-    llama_test_cmd(
-        ${CMAKE_CURRENT_SOURCE_DIR}/test-tokenizers-repo.sh
-        NAME test-tokenizers-ggml-vocabs
-        WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
-        ARGS https://huggingface.co/ggml-org/vocabs ${PROJECT_SOURCE_DIR}/models/ggml-vocabs
-    )
-endif()
+llama_test_cmd(
+    ${CMAKE_CURRENT_SOURCE_DIR}/test-tokenizers-repo.sh
+    NAME test-tokenizers-ggml-vocabs
+    WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+    ARGS https://huggingface.co/ggml-org/vocabs ${PROJECT_SOURCE_DIR}/models/ggml-vocabs
+)
 
 if (LLAMA_LLGUIDANCE)
     llama_build_and_test(test-grammar-llguidance.cpp ARGS ${PROJECT_SOURCE_DIR}/models/ggml-vocab-llama-bpe.gguf)
 endif ()
 
-if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
-    # these tests are disabled on Windows because they use internal functions not exported with LLAMA_API (when building with shared libraries)
-    llama_build_and_test(test-sampling.cpp)
+# these tests use internal functions not exported with LLAMA_API
+llama_build_and_test(test-sampling.cpp)
     llama_build_and_test(test-reasoning-budget.cpp)
     llama_build_and_test(test-grammar-parser.cpp)
     llama_build_and_test(test-grammar-integration.cpp)
@@ -192,7 +189,6 @@ if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     # llama_build_and_test(test-double-float.cpp) # SLOW
 
     llama_build_and_test(test-llama-archs.cpp)
-endif()
 
 llama_build_and_test(test-chat-peg-parser.cpp peg-parser/simple-tokenize.cpp)
 llama_build_and_test(test-jinja.cpp)
@@ -214,13 +210,8 @@ llama_build_and_test(
 )
 llama_build_and_test(test-regex-partial.cpp)
 
-if (NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "s390x")
-    set(MODEL_NAME "tinyllamas/stories15M-q4_0.gguf")
-    set(MODEL_HASH "SHA256=66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739")
-else()
-    set(MODEL_NAME "tinyllamas/stories15M-be.Q4_0.gguf")
-    set(MODEL_HASH "SHA256=9aec857937849d976f30397e97eb1cabb53eb9dcb1ce4611ba8247fb5f44c65d")
-endif()
+set(MODEL_NAME "tinyllamas/stories15M-q4_0.gguf")
+set(MODEL_HASH "SHA256=66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739")
 set(MODEL_DEST "${CMAKE_BINARY_DIR}/${MODEL_NAME}")
 
 add_test(NAME test-download-model COMMAND ${CMAKE_COMMAND}
