@@ -13,26 +13,12 @@
 #include <stdbool.h>
 
 #ifdef LLAMA_SHARED
-#    if defined(_WIN32) && !defined(__MINGW32__)
-#        ifdef LLAMA_BUILD
-#            define LLAMA_API __declspec(dllexport)
-#        else
-#            define LLAMA_API __declspec(dllimport)
-#        endif
-#    else
-#        define LLAMA_API __attribute__ ((visibility ("default")))
-#    endif
+#    define LLAMA_API __attribute__ ((visibility ("default")))
 #else
 #    define LLAMA_API
 #endif
 
-#ifdef __GNUC__
-#    define DEPRECATED(func, hint) func __attribute__((deprecated(hint)))
-#elif defined(_MSC_VER)
-#    define DEPRECATED(func, hint) __declspec(deprecated(hint)) func
-#else
-#    define DEPRECATED(func, hint) func
-#endif
+#define DEPRECATED(func, hint) func __attribute__((deprecated(hint)))
 
 #define LLAMA_DEFAULT_SEED 0xFFFFFFFF
 

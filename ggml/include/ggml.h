@@ -174,27 +174,12 @@
 //
 
 #ifdef GGML_SHARED
-#    if defined(_WIN32) && !defined(__MINGW32__)
-#        ifdef GGML_BUILD
-#            define GGML_API __declspec(dllexport) extern
-#        else
-#            define GGML_API __declspec(dllimport) extern
-#        endif
-#    else
-#        define GGML_API __attribute__ ((visibility ("default"))) extern
-#    endif
+#    define GGML_API __attribute__ ((visibility ("default"))) extern
 #else
 #    define GGML_API extern
 #endif
 
-// TODO: support for clang
-#ifdef __GNUC__
-#    define GGML_DEPRECATED(func, hint) func __attribute__((deprecated(hint)))
-#elif defined(_MSC_VER)
-#    define GGML_DEPRECATED(func, hint) __declspec(deprecated(hint)) func
-#else
-#    define GGML_DEPRECATED(func, hint) func
-#endif
+#define GGML_DEPRECATED(func, hint) func __attribute__((deprecated(hint)))
 
 #ifndef __GNUC__
 #    define GGML_ATTRIBUTE_FORMAT(...)
@@ -202,10 +187,6 @@
 #    define GGML_ATTRIBUTE_FORMAT(...) __attribute__((format(gnu_printf, __VA_ARGS__)))
 #else
 #    define GGML_ATTRIBUTE_FORMAT(...) __attribute__((format(printf, __VA_ARGS__)))
-#endif
-
-#if defined(_WIN32) && !defined(_WIN32_WINNT)
-#    define _WIN32_WINNT 0x0A00
 #endif
 
 #include <stdbool.h>
@@ -234,11 +215,6 @@
 
 #if UINTPTR_MAX == 0xFFFFFFFF
     #define GGML_MEM_ALIGN 4
-#elif defined(__EMSCRIPTEN__)
-// emscripten uses max_align_t == 8, so we need GGML_MEM_ALIGN == 8 for 64-bit wasm.
-// (for 32-bit wasm, the first conditional is true and GGML_MEM_ALIGN stays 4.)
-// ref: https://github.com/ggml-org/llama.cpp/pull/18628
-    #define GGML_MEM_ALIGN 8
 #else
     #define GGML_MEM_ALIGN 16
 #endif
@@ -268,18 +244,12 @@ __host__ __device__ constexpr inline void ggml_unused_vars_impl(Args&&...) noexc
 
 #ifndef NDEBUG
 #   define GGML_UNREACHABLE() do { fprintf(stderr, "statement should be unreachable\n"); abort(); } while(0)
-#elif defined(__GNUC__)
-#   define GGML_UNREACHABLE() __builtin_unreachable()
-#elif defined(_MSC_VER)
-#   define GGML_UNREACHABLE() __assume(0)
 #else
-#   define GGML_UNREACHABLE() ((void) 0)
+#   define GGML_UNREACHABLE() __builtin_unreachable()
 #endif
 
 #ifdef __cplusplus
 #   define GGML_NORETURN [[noreturn]]
-#elif defined(_MSC_VER)
-#   define GGML_NORETURN __declspec(noreturn)
 #else
 #   define GGML_NORETURN _Noreturn
 #endif
