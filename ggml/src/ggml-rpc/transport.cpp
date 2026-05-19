@@ -1,22 +1,13 @@
 #include "transport.h"
 #include "ggml-impl.h"
 
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  ifndef NOMINMAX
-#     define NOMINMAX
-#  endif
-#  include <windows.h>
-#  include <winsock2.h>
-#else
-#  include <arpa/inet.h>
-#  include <sys/socket.h>
-#  include <sys/types.h>
-#  include <netinet/in.h>
-#  include <netinet/tcp.h>
-#  include <netdb.h>
-#  include <unistd.h>
-#endif
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <netdb.h>
+#include <unistd.h>
 #include <cstdlib>
 #include <mutex>
 #include <optional>
@@ -24,17 +15,10 @@
 #ifdef GGML_RPC_RDMA
 #  include <infiniband/verbs.h>
 #  include <time.h>
-#  ifndef _WIN32
-#    include <poll.h>
-#  endif
+#  include <poll.h>
 #endif // GGML_RPC_RDMA
 
-#ifdef _WIN32
-typedef SOCKET sockfd_t;
-using ssize_t = __int64;
-#else
 typedef int sockfd_t;
-#endif
 
 static const char * RPC_DEBUG = std::getenv("GGML_RPC_DEBUG");
 
@@ -142,24 +126,16 @@ socket_t::impl::~impl() {
     rdma.reset();
 #endif // GGML_RPC_RDMA
     LOG_DBG("[%s] closing socket %d\n", __func__, this->fd);
-#ifdef _WIN32
-    if (fd != INVALID_SOCKET) closesocket(this->fd);
-#else
     if (fd >= 0) close(this->fd);
-#endif
 }
 
 #ifdef GGML_RPC_RDMA
 
 bool socket_t::impl::tcp_peer_closed() {
     if (fd < 0) return false;
-#ifndef _WIN32
     struct pollfd pfd = { fd, POLLIN | POLLRDHUP, 0 };
     int r = poll(&pfd, 1, 0);
     return r > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLRDHUP));
-#else
-    return false;
-#endif
 }
 
 // Build a RoCE GID-shaped 16-byte target from a TCP socket's local address.
@@ -565,11 +541,7 @@ void socket_t::update_caps(const uint8_t * remote_caps) {
 }
 
 static bool is_valid_fd(sockfd_t sockfd) {
-#ifdef _WIN32
-    return sockfd != INVALID_SOCKET;
-#else
     return sockfd >= 0;
-#endif
 }
 
 static bool set_no_delay(sockfd_t sockfd) {
@@ -648,36 +620,9 @@ socket_ptr socket_t::connect(const char * host, int port) {
     return socket_ptr(new socket_t(std::make_unique<impl>(sockfd)));
 }
 
-#ifdef _WIN32
-static std::mutex g_rpc_transport_mu;
-static bool g_rpc_transport_wsa_started = false;
-#endif
-
 bool rpc_transport_init() {
-#ifdef _WIN32
-    std::lock_guard<std::mutex> lock(g_rpc_transport_mu);
-    if (g_rpc_transport_wsa_started) {
-        return true;
-    }
-    WSADATA wsaData;
-    int res = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (res != 0) {
-        return false;
-    }
-    g_rpc_transport_wsa_started = true;
     return true;
-#else
-    return true;
-#endif
 }
 
 void rpc_transport_shutdown() {
-#ifdef _WIN32
-    std::lock_guard<std::mutex> lock(g_rpc_transport_mu);
-    if (!g_rpc_transport_wsa_started) {
-        return;
-    }
-    WSACleanup();
-    g_rpc_transport_wsa_started = false;
-#endif
 }

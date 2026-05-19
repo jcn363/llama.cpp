@@ -15,11 +15,7 @@
 #include "ggml.h"
 #include "common.h"
 
-#if defined(_MSC_VER) || defined(__MINGW32__)
-#include <malloc.h> // using malloc.h with MSC/MINGW
-#elif !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
 #include <alloca.h>
-#endif
 
 #include <assert.h>
 #include <errno.h>
@@ -94,100 +90,9 @@ struct ggml_riscv_arch_features_type {
 } ggml_riscv_arch_features = { 0 };
 #endif
 
-#if defined(_WIN32)
-
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-    #define NOMINMAX
-#endif
-#include <windows.h>
-
-#if defined(_MSC_VER) && !defined(__clang__)
-#define GGML_CACHE_ALIGN __declspec(align(GGML_CACHE_LINE))
-
-typedef volatile LONG atomic_int;
-typedef atomic_int atomic_bool;
-typedef atomic_int atomic_flag;
-
-#define ATOMIC_FLAG_INIT 0
-
-typedef enum {
-    memory_order_relaxed,
-    memory_order_consume,
-    memory_order_acquire,
-    memory_order_release,
-    memory_order_acq_rel,
-    memory_order_seq_cst
-} memory_order;
-
-static void atomic_store(atomic_int * ptr, LONG val) {
-    InterlockedExchange(ptr, val);
-}
-static void atomic_store_explicit(atomic_int * ptr, LONG val, memory_order mo) {
-    // TODO: add support for explicit memory order
-    InterlockedExchange(ptr, val);
-}
-static LONG atomic_load(atomic_int * ptr) {
-    return InterlockedCompareExchange(ptr, 0, 0);
-}
-static LONG atomic_load_explicit(atomic_int * ptr, memory_order mo) {
-    // TODO: add support for explicit memory order
-    return InterlockedCompareExchange(ptr, 0, 0);
-}
-static LONG atomic_fetch_add(atomic_int * ptr, LONG inc) {
-    return InterlockedExchangeAdd(ptr, inc);
-}
-static LONG atomic_fetch_add_explicit(atomic_int * ptr, LONG inc, memory_order mo) {
-    // TODO: add support for explicit memory order
-    return InterlockedExchangeAdd(ptr, inc);
-}
-static atomic_bool atomic_flag_test_and_set(atomic_flag * ptr) {
-    return InterlockedExchange(ptr, 1);
-}
-static void atomic_flag_clear(atomic_flag * ptr) {
-    InterlockedExchange(ptr, 0);
-}
-static void atomic_thread_fence(memory_order mo) {
-    MemoryBarrier();
-}
-#else // clang
-#include <stdatomic.h>
-#endif
-
-typedef HANDLE pthread_t;
-
-typedef DWORD thread_ret_t;
-static int pthread_create(pthread_t * out, void * unused, thread_ret_t(*func)(void *), void * arg) {
-    (void) unused;
-    HANDLE handle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) func, arg, 0, NULL);
-    if (handle == NULL)
-    {
-        return EAGAIN;
-    }
-
-    *out = handle;
-    return 0;
-}
-
-static int pthread_join(pthread_t thread, void * unused) {
-    (void) unused;
-    int ret = (int) WaitForSingleObject(thread, INFINITE);
-    CloseHandle(thread);
-    return ret;
-}
-
-static int sched_yield (void) {
-    Sleep (0);
-    return 0;
-}
-#else
-
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sched.h>
-#if defined(__FreeBSD__)
-#include <pthread_np.h>
-#endif
 
 typedef void * thread_ret_t;
 
@@ -195,18 +100,9 @@ typedef void * thread_ret_t;
 #include <sys/stat.h>
 #include <unistd.h>
 
-#endif
-
 typedef pthread_t ggml_thread_t;
 
 #define GGML_THREADPOOL_N_THREADS_MASK (0xffffU)
-#define GGML_THREADPOOL_N_THREADS_BITS (16)
-
-#if defined(__APPLE__)
-#include <unistd.h>
-#include <mach/mach.h>
-#include <TargetConditionals.h>
-#endif
 
 static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_F32] = {
@@ -415,28 +311,6 @@ const struct ggml_type_traits_cpu * ggml_get_type_traits_cpu(enum ggml_type type
 
 typedef pthread_t          ggml_thread_t;
 
-#if defined(_WIN32)
-
-typedef CONDITION_VARIABLE ggml_cond_t;
-typedef SRWLOCK            ggml_mutex_t;
-
-#define ggml_mutex_init(m)   InitializeSRWLock(m)
-#define ggml_mutex_destroy(m)
-#define ggml_mutex_lock(m)   AcquireSRWLockExclusive(m)
-#define ggml_mutex_unlock(m) ReleaseSRWLockExclusive(m)
-#define ggml_mutex_lock_shared(m)   AcquireSRWLockShared(m)
-#define ggml_mutex_unlock_shared(m) ReleaseSRWLockShared(m)
-
-#define ggml_cond_init(c)    InitializeConditionVariable(c)
-#define ggml_cond_destroy(c)
-#define ggml_cond_wait(c, m) SleepConditionVariableSRW(c, m, INFINITE, CONDITION_VARIABLE_LOCKMODE_SHARED)
-#define ggml_cond_broadcast(c) WakeAllConditionVariable(c)
-
-#define ggml_thread_create pthread_create
-#define ggml_thread_join   pthread_join
-
-#else
-
 typedef pthread_cond_t     ggml_cond_t;
 typedef pthread_mutex_t    ggml_mutex_t;
 
@@ -449,11 +323,7 @@ typedef pthread_mutex_t    ggml_mutex_t;
 
 #define ggml_lock_init(x)    UNUSED(x)
 #define ggml_lock_destroy(x) UNUSED(x)
-#if defined(__x86_64__) || (defined(_MSC_VER) && defined(_M_AMD64))
 #define ggml_lock_lock(x)    _mm_pause()
-#else
-#define ggml_lock_lock(x)    UNUSED(x)
-#endif
 #define ggml_lock_unlock(x)  UNUSED(x)
 
 #define GGML_LOCK_INITIALIZER 0
@@ -464,8 +334,6 @@ typedef pthread_mutex_t    ggml_mutex_t;
 
 #define ggml_thread_create pthread_create
 #define ggml_thread_join   pthread_join
-
-#endif
 
 // Threadpool def
 struct ggml_threadpool {
@@ -2456,127 +2324,6 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
 
 static thread_ret_t ggml_graph_compute_secondary_thread(void* data);
 
-#if defined(_WIN32)
-#include "windows.h"
-
-// TODO: support > 64 CPUs
-static bool ggml_thread_apply_affinity(bool * mask) {
-    HANDLE    h = GetCurrentThread();
-    uint64_t  bitmask = 0ULL;
-
-    assert(GGML_MAX_N_THREADS >= 64);
-
-    for (int32_t i = 0; i < 8; i++) {
-        int32_t idx = i * 8;
-        uint8_t val = 0;
-        val |= mask[idx + 0] << 0;
-        val |= mask[idx + 1] << 1;
-        val |= mask[idx + 2] << 2;
-        val |= mask[idx + 3] << 3;
-        val |= mask[idx + 4] << 4;
-        val |= mask[idx + 5] << 5;
-        val |= mask[idx + 6] << 6;
-        val |= mask[idx + 7] << 7;
-        bitmask |= (uint64_t)val << idx;
-    }
-
-    for (int32_t i = 64; i < GGML_MAX_N_THREADS; i++) {
-        if (mask[i]) {
-            fprintf(stderr, "warn: setting thread-affinity for > 64 CPUs isn't supported on windows!\n");
-            break;
-        }
-    }
-
-    DWORD_PTR m = (DWORD_PTR)bitmask;
-
-    m = SetThreadAffinityMask(h, m);
-
-    return m != 0;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    // Note that on Windows the Process Priority Class must be updated in order to set Thread priority.
-    // This is up to the applications.
-    DWORD p = THREAD_PRIORITY_NORMAL;
-    switch (prio) {
-        case GGML_SCHED_PRIO_LOW:      p = THREAD_PRIORITY_BELOW_NORMAL;  break;
-        case GGML_SCHED_PRIO_NORMAL:   p = THREAD_PRIORITY_NORMAL;        break;
-        case GGML_SCHED_PRIO_MEDIUM:   p = THREAD_PRIORITY_ABOVE_NORMAL;  break;
-        case GGML_SCHED_PRIO_HIGH:     p = THREAD_PRIORITY_HIGHEST;       break;
-        case GGML_SCHED_PRIO_REALTIME: p = THREAD_PRIORITY_TIME_CRITICAL; break;
-    }
-
-    if (prio != GGML_SCHED_PRIO_LOW) {
-        // Tell Windows that this thread should not be throttled (needs its own CPU core).
-        // Newer Windows 11 versions aggressively park (offline) CPU cores and often place
-        // all our threads onto the first 4 cores which results in terrible performance with
-        // n_threads > 4
-        #if _WIN32_WINNT >= 0x0602
-        THREAD_POWER_THROTTLING_STATE t;
-        ZeroMemory(&t, sizeof(t));
-        t.Version     = THREAD_POWER_THROTTLING_CURRENT_VERSION;
-        t.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
-        t.StateMask   = 0;
-
-        if (!SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &t, sizeof(t))) {
-            GGML_LOG_DEBUG("failed to disable thread power throttling %d : (%d)\n", prio, (int) GetLastError());
-            return false;
-        }
-        #endif
-    }
-
-    if (prio == GGML_SCHED_PRIO_NORMAL) {
-        // Keep inherited policy/priority
-        return true;
-    }
-
-    if (!SetThreadPriority(GetCurrentThread(), p)) {
-        fprintf(stderr, "warn: failed to set thread priority %d : (%d)\n", prio, (int) GetLastError());
-        return false;
-    }
-
-    return true;
-}
-
-#elif defined(__APPLE__)
-#include <sys/types.h>
-#include <sys/resource.h>
-
-static bool ggml_thread_apply_affinity(const bool * mask) {
-    // Not supported on Apple platforms
-    UNUSED(mask);
-    return true;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    struct sched_param p;
-    int32_t policy = SCHED_OTHER;
-    switch (prio) {
-        // TODO: there seems to be no way to set lower prio on Apple platforms
-        case GGML_SCHED_PRIO_LOW:      policy = SCHED_OTHER; p.sched_priority = 0;  break;
-        case GGML_SCHED_PRIO_NORMAL:   policy = SCHED_OTHER; p.sched_priority = 0;  break;
-        case GGML_SCHED_PRIO_MEDIUM:   policy = SCHED_FIFO;  p.sched_priority = 40; break;
-        case GGML_SCHED_PRIO_HIGH:     policy = SCHED_FIFO;  p.sched_priority = 80; break;
-        case GGML_SCHED_PRIO_REALTIME: policy = SCHED_FIFO;  p.sched_priority = 90; break;
-    }
-
-    if (prio == GGML_SCHED_PRIO_NORMAL) {
-        // Keep inherited policy/priority
-        return true;
-    }
-
-    int32_t err = pthread_setschedparam(pthread_self(), policy, &p);
-    if (err != 0) {
-        fprintf(stderr, "warn: failed to set thread priority %d : %s (%d)\n", prio, strerror(err), err);
-        return false;
-    }
-
-    return true;
-}
-
-#elif defined(__gnu_linux__)
-// TODO: this may not work on BSD, to be verified
-
 static bool ggml_thread_apply_affinity(const bool * mask) {
     cpu_set_t cpuset;
     int err;
@@ -2590,14 +2337,7 @@ static bool ggml_thread_apply_affinity(const bool * mask) {
         }
     }
 
-#ifdef __ANDROID__
-    err = sched_setaffinity(0, sizeof(cpuset), &cpuset);
-    if (err < 0) {
-        err = errno;
-    }
-#else
     err = pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
-#endif
     if (err != 0) {
         fprintf(stderr, "warn: failed to set affinity mask 0x%llx : %s (%d)\n", (unsigned long long)mask, strerror(err), err);
         return false;
@@ -2630,20 +2370,6 @@ static bool ggml_thread_apply_priority(int32_t prio) {
 
     return true;
 }
-
-#else // unsupported platforms
-
-static bool ggml_thread_apply_affinity(const bool * mask) {
-    UNUSED(mask);
-    return true;
-}
-
-static bool ggml_thread_apply_priority(int32_t prio) {
-    UNUSED(prio);
-    return true;
-}
-
-#endif
 
 static bool ggml_thread_cpumask_is_valid(const bool * mask) {
     for (int i = 0; i < GGML_MAX_N_THREADS; i++) {
@@ -3806,11 +3532,7 @@ void ggml_cpu_init(void) {
             if (!getenv("KMP_BLOCKTIME")) {
                 // set the time to wait before sleeping a thread
                 // this is less aggressive than setting the wait policy to active, but should achieve similar results in most cases
-#ifdef _WIN32
-                _putenv_s("KMP_BLOCKTIME", "200"); // 200ms
-#else
                 setenv("KMP_BLOCKTIME", "200", 0); // 200ms
-#endif
             }
 #endif
         }

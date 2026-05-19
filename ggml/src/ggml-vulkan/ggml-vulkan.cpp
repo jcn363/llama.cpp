@@ -53,26 +53,11 @@ DispatchLoaderDynamic & ggml_vk_default_dispatcher();
 #include <future>
 #include <thread>
 
-#if defined(_MSC_VER)
-# define NOMINMAX 1
-# include <windows.h>
-# define YIELD() YieldProcessor()
-#elif defined(__clang__) || defined(__GNUC__)
-# if defined(__x86_64__) ||defined(__i386__)
+#if defined(__x86_64__) || defined(__i386__)
 #  include <immintrin.h>
 #  define YIELD() _mm_pause()
-# elif defined(__arm__) || defined(__aarch64__)
-#  if defined(__clang__)
-#   include <arm_acle.h>
-#   define YIELD() __yield()
-#  else
-#   define YIELD() asm volatile("yield")
-#  endif
-# endif
-#endif
-
-#if !defined(YIELD)
-#define YIELD()
+#else
+#  define YIELD()
 #endif
 
 #include "ggml-impl.h"
@@ -5247,13 +5232,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
         device->subgroup_basic = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
                                  (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eBasic);
         device->subgroup_arithmetic = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
-                                      (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eArithmetic);
-#ifdef __APPLE__
-        // Workaround for subgroup arithmetic failing on MoltenVK with AMD GPUs (issue 15846)
-        if (device->vendor_id == VK_VENDOR_ID_AMD) {
-            device->subgroup_arithmetic = false;
-        }
-#endif
+                                       (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eArithmetic);
         device->subgroup_shuffle = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
                                    (vk11_props.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eShuffle);
         device->subgroup_clustered = (vk11_props.subgroupSupportedStages & vk::ShaderStageFlagBits::eCompute) &&
@@ -5985,9 +5964,6 @@ static void ggml_vk_instance_init() {
 
     const std::vector<vk::ExtensionProperties> instance_extensions = vk::enumerateInstanceExtensionProperties();
     const bool layer_settings = ggml_vk_instance_layer_settings_available();
-#ifdef __APPLE__
-    const bool portability_enumeration_ext = ggml_vk_instance_portability_enumeration_ext_available(instance_extensions);
-#endif
     const bool debug_utils_ext = ggml_vk_instance_debug_utils_ext_available(instance_extensions) && getenv("GGML_VK_DEBUG_MARKERS") != nullptr;
     std::vector<const char*> layers;
 
@@ -5998,11 +5974,6 @@ static void ggml_vk_instance_init() {
     if (layer_settings) {
         extensions.push_back("VK_EXT_layer_settings");
     }
-#ifdef __APPLE__
-    if (portability_enumeration_ext) {
-        extensions.push_back("VK_KHR_portability_enumeration");
-    }
-#endif
     if (debug_utils_ext) {
         extensions.push_back("VK_EXT_debug_utils");
     }
@@ -6018,11 +5989,6 @@ static void ggml_vk_instance_init() {
     };
     vk::LayerSettingsCreateInfoEXT layer_setting_info(settings);
     vk::InstanceCreateInfo instance_create_info(vk::InstanceCreateFlags{}, &app_info, layers, extensions, &layer_setting_info);
-#ifdef __APPLE__
-    if (portability_enumeration_ext) {
-        instance_create_info.flags |= vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR;
-    }
-#endif
 
     vk_instance.instance = vk::createInstance(instance_create_info);
     vk_instance_initialized = true;
@@ -16514,18 +16480,8 @@ static bool ggml_vk_instance_layer_settings_available() {
     return false;
 }
 static bool ggml_vk_instance_portability_enumeration_ext_available(const std::vector<vk::ExtensionProperties>& instance_extensions) {
-#ifdef __APPLE__
-    // Check for portability enumeration extension for MoltenVK support
-    for (const auto& properties : instance_extensions) {
-        if (strcmp("VK_KHR_portability_enumeration", properties.extensionName) == 0) {
-            return true;
-        }
-    }
-    std::cerr << "ggml_vulkan: WARNING: Instance extension VK_KHR_portability_enumeration not found." << std::endl;
-#endif
-    return false;
-
     UNUSED(instance_extensions);
+    return false;
 }
 
 // Extension availability
