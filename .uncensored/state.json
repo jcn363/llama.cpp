@@ -1,18 +1,20 @@
 {
-  "session_id": "audit-2026-05-19",
+  "session_id": "amd64-linux-strip-2026-05-19",
   "created_at": "2026-05-19T00:00:00Z",
   "updated_at": "2026-05-19T00:00:00Z",
   "context": {
-    "goal": "Audit and fix codebase issues: gotchas, bugs, dead code, stubs, TODOs",
+    "goal": "Strip llama.cpp to AMD64 Linux only support",
     "completed": [
-      "Full codebase audit completed (excluding vendor/)",
-      "Found 765 TODO/FIXME markers in project code",
-      "Found 33 'not implemented' aborts/asserts (mostly intentional backend limitations)",
-      "Found 742 GGML_UNUSED markers (standard C/C++ idiom)",
-      "Fixed 9 accidental double semicolons (;;)",
-      "Documented 4 empty catch blocks with explanatory comments",
+      "Removed 6 non-x86_64 CPU arch dirs: arm, loongarch, powerpc, riscv, s390, wasm",
+      "Removed 10 non-Linux backend dirs: metal, hexagon, cann, webgpu, sycl, openvino, zdnn, virtgpu, musa, zendnn",
+      "Removed 9 backend headers from ggml/include/",
+      "Removed spacemit RISC-V optimization directory",
+      "Rewrote top-level CMakeLists.txt: removed WASM, MSVC, iOS, deprecated backend options",
+      "Rewrote ggml/CMakeLists.txt: removed all non-Linux backend options, Apple/Windows code",
+      "Rewrote ggml/src/CMakeLists.txt: simplified to x86_64 + CUDA/HIP/Vulkan/OpenCL/BLAS/RPC",
+      "Rewrote ggml-cpu CMakeLists.txt: stripped to x86_64 instruction sets only (SSE4.2 through AVX512/AMX)",
       "Verified clean build of ggml and llama targets",
-      "Committed as 3f2ab1d75"
+      "Committed as e83f271e6: 415 files changed, -166,104 lines"
     ],
     "pending": [],
     "failed": [],
@@ -20,31 +22,30 @@
   },
   "memory": {
     "key_facts": [
-      "llama.cpp is C/C++ only - no Rust files exist",
-      "vendor/ contains stb_image, nlohmann/json, miniaudio, cpp-httplib - all have their own TODOs",
-      "Backend 'not implemented' assertions are intentional platform limitations",
-      "GGML_UNUSED is the project's standard way to suppress unused parameter warnings"
+      "llama.cpp stripped to AMD64 Linux only",
+      "Kept backends: CPU (x86_64), CUDA, HIP, Vulkan, OpenCL, BLAS, RPC",
+      "Removed ~166K lines of code from non-AMD64-Linux platforms",
+      "Build system simplified: no more platform detection, hardcoded for Linux x86_64"
     ],
-    "decisions": [],
+    "decisions": [
+      "Keep CUDA and HIP backends as they work on AMD64 Linux with NVIDIA/AMD GPUs",
+      "Keep Vulkan and OpenCL as cross-platform GPU APIs that work on Linux",
+      "Keep BLAS and RPC as useful Linux-compatible backends"
+    ],
     "learnings": [
-      "Double semicolons found in: caps.cpp, ngram-cache.cpp, binary-ops.c, ggml-opencl.cpp (2x), ggml-vulkan.cpp, repack.cpp, ops.cpp, element_wise.cpp",
-      "Empty catch blocks are intentional fallback patterns - documented rather than removed"
+      "Original ggml-cpu CMakeLists.txt was 731 lines, now ~150 lines",
+      "Original ggml/CMakeLists.txt was 505 lines, now ~220 lines",
+      "415 files changed total, mostly deletions"
     ]
   },
   "files": {
     "modified": [
-      "common/hf-cache.cpp",
-      "common/jinja/caps.cpp",
-      "common/jinja/value.cpp",
-      "common/ngram-cache.cpp",
-      "ggml/src/ggml-cpu/arch/x86/repack.cpp",
-      "ggml/src/ggml-cpu/ops.cpp",
-      "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
-      "ggml/src/ggml-hexagon/htp/binary-ops.c",
-      "ggml/src/ggml-opencl/ggml-opencl.cpp",
-      "ggml/src/ggml-sycl/element_wise.cpp",
-      "ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+      "CMakeLists.txt",
+      "ggml/CMakeLists.txt",
+      "ggml/src/CMakeLists.txt",
+      "ggml/src/ggml-cpu/CMakeLists.txt"
     ],
-    "created": [".uncensored/SOUL.md", ".uncensored/MEMORY.md", ".uncensored/state.json", ".uncensored/history.jsonl"]
+    "created": [".uncensored/SOUL.md", ".uncensored/MEMORY.md", ".uncensored/state.json", ".uncensored/history.jsonl"],
+    "deleted": "400+ files from removed backends and architectures"
   }
 }
