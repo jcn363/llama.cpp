@@ -1,0 +1,22 @@
+[package]
+name = "ggml-cpu"
+description = "CPU backend for ggml, optimized for AMD Opteron 3280 (bdver1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ggml = { workspace = true }
+rayon = { workspace = true }
+tracing = { workspace = true }
+bytemuck = { workspace = true }
+half = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "cpu_bench"
+harness = false

@@ -1,0 +1,3 @@
+[build]
+# Target bdver1 for AMD Opteron 3280
+rustflags = ["-C", "target-cpu=bdver1"]

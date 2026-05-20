@@ -1,0 +1,26 @@
+[package]
+name = "ggml-cuda"
+description = "CUDA backend for ggml, optimized for NVIDIA GTX 1050 (compute 6.1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ggml = { workspace = true }
+cudarc = { workspace = true, features = ["f16"], optional = true }
+tracing = { workspace = true }
+half = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []
+cuda = ["dep:cudarc"]
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "cuda_bench"
+harness = false

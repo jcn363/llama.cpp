@@ -1,0 +1,6 @@
+edition = "2024"
+
+[format]
+max_width = 100
+tab_spaces = 4
+newline_style = "Unix"

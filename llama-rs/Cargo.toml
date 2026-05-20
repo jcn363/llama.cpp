@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gguf",
+    "crates/ggml",
+    "crates/ggml-cpu",
+    "crates/ggml-cuda",
+    "crates/llama",
+    "crates/common",
+    "crates/llama-cli",
+    "crates/llama-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/jcn363/llama.cpp"
+
+[workspace.dependencies]
+# Internal crates
+gguf = { path = "crates/gguf" }
+ggml = { path = "crates/ggml" }
+ggml-cpu = { path = "crates/ggml-cpu" }
+ggml-cuda = { path = "crates/ggml-cuda" }
+llama = { path = "crates/llama" }
+common = { path = "crates/common" }
+
+# External crates
+byteorder = "1.5"
+memmap2 = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+half = { version = "2.4", features = ["serde"] }
+bytemuck = { version = "1.21", features = ["derive"] }
+thiserror = "2.0"
+anyhow = "1.0"
+ndarray = "0.16"
+rayon = "1.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1.43", features = ["full"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# CUDA (optional, feature-gated per-crate)
+cudarc = "0.16"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

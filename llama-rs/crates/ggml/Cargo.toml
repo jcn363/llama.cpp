@@ -1,0 +1,23 @@
+[package]
+name = "ggml"
+description = "Core tensor library and computation graph (ggml equivalent in Rust)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gguf = { workspace = true }
+thiserror = { workspace = true }
+half = { workspace = true }
+bytemuck = { workspace = true }
+ndarray = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "tensor_bench"
+harness = false

@@ -1,0 +1,27 @@
+[package]
+name = "llama"
+description = "LLaMA inference engine (llama.cpp equivalent in Rust)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ggml = { workspace = true }
+ggml-cpu = { workspace = true }
+ggml-cuda = { workspace = true, optional = true }
+gguf = { workspace = true }
+common = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+cuda = ["dep:ggml-cuda", "ggml-cuda/cuda"]
+
+[dev-dependencies]
+criterion = { workspace = true }

@@ -1,0 +1,24 @@
+[package]
+name = "llama-server"
+description = "HTTP server for llama inference"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "llama-server"
+path = "src/main.rs"
+
+[dependencies]
+llama = { workspace = true }
+common = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+axum = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
