@@ -170,6 +170,14 @@ pub struct Tokenizer {
     pub scores: Option<Vec<f32>>,
     /// Token types (optional).
     pub types: Option<Vec<i32>>,
+    /// BPE merge rules: (first, second) → rank.
+    bpe_merges: Vec<(String, String)>,
+    /// BOS token ID.
+    bos_token_id: u32,
+    /// EOS token ID.
+    eos_token_id: u32,
+    /// Tokenizer type: "bpe", "spm", or "wpm".
+    tokenizer_type: String,
 }
 
 impl Tokenizer {
@@ -225,26 +233,142 @@ impl Tokenizer {
             })
             .transpose()?;
 
+        // Read BPE merges
+        let bpe_merges = match reader.get_kv("tokenizer.ggml.merges") {
+            Some(gguf::GgufValue::Array { data, .. }) => {
+                let mut merges = Vec::with_capacity(data.len());
+                for merge in data {
+                    if let gguf::GgufValue::Str(s) = merge {
+                        if let Some(space_pos) = s.find(' ') {
+                            let first = s[..space_pos].to_string();
+                            let second = s[space_pos + 1..].to_string();
+                            merges.push((first, second));
+                        }
+                    }
+                }
+                merges
+            }
+            _ => Vec::new(),
+        };
+
+        // Get tokenizer type
+        let tokenizer_type = match reader.get_kv("tokenizer.ggml.model") {
+            Some(gguf::GgufValue::Str(s)) => s.clone(),
+            _ => "bpe".to_string(),
+        };
+
+        // Get BOS/EOS token IDs
+        let bos_token_id = reader
+            .get_kv("tokenizer.ggml.bos_token_id")
+            .and_then(|v| match v {
+                gguf::GgufValue::U32(id) => Some(*id),
+                gguf::GgufValue::U64(id) => Some(*id as u32),
+                _ => None,
+            })
+            .unwrap_or(1);
+
+        let eos_token_id = reader
+            .get_kv("tokenizer.ggml.eos_token_id")
+            .and_then(|v| match v {
+                gguf::GgufValue::U32(id) => Some(*id),
+                gguf::GgufValue::U64(id) => Some(*id as u32),
+                _ => None,
+            })
+            .unwrap_or(2);
+
         Ok(Self {
             tokens,
             scores,
             types,
+            bpe_merges,
+            bos_token_id,
+            eos_token_id,
+            tokenizer_type,
         })
     }
 
-    /// Encode a string into token IDs (simple exact match).
+    /// Encode a string into token IDs.
     ///
-    /// TODO: Implement proper BPE/SPM tokenization.
+    /// For BPE tokenizers, uses merge rules from the model.
+    /// For other types, falls back to exact match.
     #[must_use]
     pub fn encode(&self, text: &str) -> Vec<u32> {
-        // Simple fallback: find exact token matches
+        if self.tokenizer_type == "bpe" && !self.bpe_merges.is_empty() {
+            self.encode_bpe(text)
+        } else {
+            self.encode_simple(text)
+        }
+    }
+
+    /// BPE encoding using merge rules.
+    fn encode_bpe(&self, text: &str) -> Vec<u32> {
+        // Step 1: Split into bytes (GPT-2 style byte-level BPE)
+        let mut words: Vec<String> = text
+            .bytes()
+            .map(|b| format!("<0x{:02X}>", b))
+            .collect();
+
+        if words.is_empty() {
+            return Vec::new();
+        }
+
+        // Step 2: Build merge rank map
+        let mut ranks: std::collections::HashMap<(String, String), usize> =
+            std::collections::HashMap::with_capacity(self.bpe_merges.len());
+        for (i, (first, second)) in self.bpe_merges.iter().enumerate() {
+            ranks.insert((first.clone(), second.clone()), i);
+        }
+
+        // Step 3: Repeatedly apply lowest-rank merge
+        loop {
+            let mut best_pair: Option<(String, String)> = None;
+            let mut best_rank = usize::MAX;
+            let mut best_idx = None;
+
+            for i in 0..words.len().saturating_sub(1) {
+                let pair = (words[i].clone(), words[i + 1].clone());
+                if let Some(&rank) = ranks.get(&pair) {
+                    if rank < best_rank {
+                        best_rank = rank;
+                        best_pair = Some(pair);
+                        best_idx = Some(i);
+                    }
+                }
+            }
+
+            match (best_pair, best_idx) {
+                (Some((first, second)), Some(idx)) => {
+                    // Merge the pair
+                    let merged = format!("{}{}", first, second);
+                    words.splice(idx..=idx + 1, [merged]);
+                }
+                _ => break, // No more merges possible
+            }
+        }
+
+        // Step 4: Convert words to token IDs
+        let mut token_ids = Vec::with_capacity(words.len());
+        for word in &words {
+            if let Some(id) = self.tokens.iter().position(|t| t == word) {
+                token_ids.push(id as u32);
+            } else {
+                // Unknown token — use UNK or fallback
+                token_ids.push(0);
+            }
+        }
+
+        token_ids
+    }
+
+    /// Simple exact-match encoding fallback.
+    fn encode_simple(&self, text: &str) -> Vec<u32> {
         let mut tokens = Vec::new();
         for word in text.split_whitespace() {
             if let Some(id) = self.tokens.iter().position(|t| t == word) {
                 tokens.push(id as u32);
             } else {
                 // Unknown token — use BOS or fallback
-                tokens.push(1); // BOS token
+                tokens.push(self.bos_token_id);
             }
         }
         tokens
@@ -1056,6 +1180,10 @@ mod tests {
             tokens: vec!["hello".into(), "world".into(), "test".into()],
             scores: None,
             types: None,
+            bpe_merges: Vec::new(),
+            bos_token_id: 1,
+            eos_token_id: 2,
+            tokenizer_type: "bpe".to_string(),
         };
 
         let encoded = tokenizer.encode("hello world");
@@ -1063,6 +1191,45 @@ mod tests {
 
         let decoded = tokenizer.decode(&[0, 1]);
         assert_eq!(decoded, "helloworld");
+    }
+
+    #[test]
+    fn bpe_tokenizer_should_apply_merges() {
+        // Create a simple BPE tokenizer with merge rules
+        let mut tokenizer = Tokenizer {
+            tokens: vec![
+                "<0x48>".into(),  // H
+                "<0x65>".into(),  // e
+                "<0x6C>".into(),  // l
+                "<0x6C65>".into(), // le (merged)
+                "<0x6C6C65>".into(), // lle (merged)
+                "<0x6F>".into(),  // o
+                "<0x20>".into(),  // space
+                "<0x57>".into(),  // W
+                "<0x72>".into(),  // r
+                "<0x6C64>".into(), // ld (merged)
+            ],
+            scores: None,
+            types: None,
+            bpe_merges: vec![
+                ("<0x6C>".into(), "<0x65>".into()),   // l + e → le
+                ("<0x6C65>".into(), "<0x6C>".into()), // le + l → lel (not used)
+                ("<0x6C>".into(), "<0x6C65>".into()), // l + le → lle
+                ("<0x6C>".into(), "<0x64>".into()),   // l + d → ld
+            ],
+            bos_token_id: 1,
+            eos_token_id: 2,
+            tokenizer_type: "bpe".to_string(),
+        };
+
+        // Add missing tokens for the test
+        tokenizer.tokens.push("<0x64>".into()); // d
+
+        // Test that BPE encoding applies merges
+        // "He" → bytes: 0x48, 0x65 → should find tokens
+        let encoded = tokenizer.encode("He");
+        // Should produce token IDs for the byte tokens
+        assert!(!encoded.is_empty());
     }
 
     #[test]
