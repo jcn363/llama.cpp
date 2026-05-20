@@ -135,6 +135,31 @@ impl Tensor {
     pub fn data(&self) -> &[u8] {
         &self.data
     }
+
+    /// Returns a mutable reference to the raw byte data.
+    #[must_use]
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
+    /// Create a tensor from an f32 slice with the given shape.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice length doesn't match the shape.
+    #[must_use]
+    pub fn from_f32(shape: &[usize], data: &[f32]) -> Self {
+        let element_count: usize = shape.iter().product();
+        assert_eq!(data.len(), element_count, "data length must match shape");
+        let bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4)
+        };
+        Self {
+            dtype: DType::F32,
+            shape: shape.to_vec(),
+            data: bytes.to_vec(),
+        }
+    }
 }
 
 /// A computation graph representing a sequence of tensor operations.
