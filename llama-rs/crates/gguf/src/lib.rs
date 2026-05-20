@@ -630,6 +630,68 @@ impl GgufReader {
     pub fn raw_data(&self) -> &[u8] {
         &self.data
     }
+
+    /// Read tensor data bytes from the memory-mapped file.
+    ///
+    /// The data is located at `data_offset + tensor.offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the offset is out of bounds.
+    pub fn read_tensor_data(&self, tensor: &TensorInfo) -> GgufResult<&[u8]> {
+        let start = self.data_offset + tensor.offset as usize;
+        if start > self.data.len() {
+            return Err(GgufError::DecodeError(format!(
+                "tensor {} offset {} out of bounds (file size {})",
+                tensor.name, tensor.offset, self.data.len()
+            )));
+        }
+
+        // Calculate tensor size from shape and dtype
+        let element_count: usize = tensor.shape.iter().map(|&d| d as usize).product();
+        let byte_size = match tensor.dtype {
+            GgmlType::F32 | GgmlType::I32 => element_count * 4,
+            GgmlType::F16 | GgmlType::I16 | GgmlType::Bf16 => element_count * 2,
+            GgmlType::F64 | GgmlType::I64 => element_count * 8,
+            GgmlType::I8 | GgmlType::Q8_0 | GgmlType::Q8_1 | GgmlType::Q8_K => element_count,
+            GgmlType::Q4_0 | GgmlType::Q4_1 => element_count / 2,
+            GgmlType::Q5_0 | GgmlType::Q5_1 => (element_count / 2) + (element_count / 32) * 2,
+            GgmlType::Q2_K => element_count / 4 + element_count / 64 + element_count / 64,
+            GgmlType::Q3_K => element_count / 4 + element_count / 64 + element_count / 64,
+            GgmlType::Q4_K => element_count / 2 + element_count / 64 + element_count / 64,
+            GgmlType::Q5_K => element_count / 2 + element_count / 64 + element_count / 64,
+            GgmlType::Q6_K => element_count / 2 + element_count / 64 + element_count / 64,
+            GgmlType::Iq2Xxs
+            | GgmlType::Iq2Xs
+            | GgmlType::Iq3Xxs
+            | GgmlType::Iq1S
+            | GgmlType::Iq4Nl
+            | GgmlType::Iq3S
+            | GgmlType::Iq2S
+            | GgmlType::Iq4Xs
+            | GgmlType::Iq1M
+            | GgmlType::Tq1_0
+            | GgmlType::Tq2_0
+            | GgmlType::Mxfp4
+            | GgmlType::Nvfp4
+            | GgmlType::Q1_0 => {
+                return Err(GgufError::DecodeError(format!(
+                    "unsupported quantized dtype for direct read: {:?}",
+                    tensor.dtype
+                )));
+            }
+        };
+
+        let end = start + byte_size;
+        if end > self.data.len() {
+            return Err(GgufError::DecodeError(format!(
+                "tensor {} data extends beyond file (need {}, have {})",
+                tensor.name, end, self.data.len()
+            )));
+        }
+
+        Ok(&self.data[start..end])
+    }
 }
 
 // ─── Binary Reader ───────────────────────────────────────────────────────────
