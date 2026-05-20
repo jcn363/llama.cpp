@@ -35,6 +35,7 @@
 )]
 
 use gguf::{GgufReader, TensorInfo};
+use std::sync::Arc;
 use thiserror::Error;
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
@@ -418,8 +419,8 @@ impl Default for ModelConfig {
 
 /// Inference context for a single generation session.
 pub struct InferenceContext {
-    /// Model reference.
-    model: Model,
+    /// Model reference (shared via Arc for server use).
+    model: Arc<Model>,
     /// Configuration.
     #[allow(dead_code)]
     config: ModelConfig,
@@ -435,7 +436,7 @@ pub struct InferenceContext {
 impl InferenceContext {
     /// Create a new inference context.
     #[must_use]
-    pub fn new(model: Model, config: ModelConfig) -> Self {
+    pub fn new(model: Arc<Model>, config: ModelConfig) -> Self {
         let arch = model.architecture();
         let n_ctx = config.n_ctx;
         let n_layer = arch.n_layer as usize;

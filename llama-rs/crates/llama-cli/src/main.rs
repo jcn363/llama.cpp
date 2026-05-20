@@ -6,6 +6,7 @@
 
 use clap::Parser;
 use llama::{InferenceContext, Model, ModelConfig};
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 /// Command-line arguments for llama-cli.
@@ -47,7 +48,7 @@ fn main() -> anyhow::Result<()> {
 
     tracing::info!("Loading model from: {}", args.model);
 
-    let model = Model::from_file(&args.model)?;
+    let model = Arc::new(Model::from_file(&args.model)?);
     tracing::info!("{}", model.summary());
 
     let config = ModelConfig {

@@ -142,15 +142,8 @@ async fn handle_completion(
         ));
     }
 
-    // Clone Arc for inference (Model is behind Arc, InferenceContext takes ownership)
-    // We need to clone the model data — for now, reload from file
-    // TODO: Implement shared model weights with Arc
-    let model = Model::from_file(state.model.path()).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("model reload error: {e}"),
-        )
-    })?;
+    // Clone Arc for inference — shares the same model weights without reloading
+    let model = Arc::clone(&state.model);
 
     let mut ctx = InferenceContext::new(model, state.config.clone());
     ctx.encode(&request.prompt);
