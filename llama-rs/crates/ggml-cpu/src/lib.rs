@@ -12,6 +12,16 @@
 #![deny(missing_docs)]
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
+#![allow(
+    clippy::many_single_char_names,
+    clippy::wildcard_imports,
+    clippy::missing_panics_doc,
+    clippy::items_after_statements,
+    clippy::too_many_arguments,
+    clippy::cast_ptr_alignment,
+    clippy::cast_possible_truncation,
+    dead_code
+)]
 
 use ggml::{DType, Tensor};
 
@@ -42,6 +52,7 @@ const SSE_F32_STEP: usize = SSE_F32_EPR * DOT_ARR;
 ///
 /// Uses AVX (8-wide) → SSE4.2 (4-wide) → scalar fallback.
 /// No FMA instructions (bdver1 doesn't support them) — uses mul + add.
+#[must_use]
 #[inline]
 pub fn dot_f32(x: &[f32], y: &[f32]) -> f32 {
     let n = x.len().min(y.len());
@@ -107,7 +118,10 @@ fn dot_f32_avx(x: &[f32], y: &[f32]) -> f32 {
         }
 
         // Extract 256-bit sum to scalar
-        let sum128 = _mm_add_ps(_mm256_extractf128_ps(sum[0], 1), _mm256_castps256_ps128(sum[0]));
+        let sum128 = _mm_add_ps(
+            _mm256_extractf128_ps(sum[0], 1),
+            _mm256_castps256_ps128(sum[0]),
+        );
         let sum64 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
         let sum32 = _mm_add_ss(sum64, _mm_movehdup_ps(sum64));
         let mut result = _mm_cvtss_f32(sum32);
@@ -175,7 +189,15 @@ fn dot_f32_sse(x: &[f32], y: &[f32]) -> f32 {
 /// * `b` - Matrix B with shape `[n, k]`
 /// * `c` - Output matrix with shape `[m, n]` (must be pre-allocated)
 /// * `n_threads` - Number of threads for parallel execution
-pub fn matmul_f32(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize, n_threads: usize) {
+pub fn matmul_f32(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    n_threads: usize,
+) {
     assert_eq!(a.len(), m * k, "A must have shape [{m}, {k}]");
     assert_eq!(b.len(), n * k, "B must have shape [{n}, {k}]");
     assert_eq!(c.len(), m * n, "C must have shape [{m}, {n}]");
@@ -185,7 +207,7 @@ pub fn matmul_f32(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: us
     const BLOCK_N: usize = 16;
 
     let n_threads = if n_threads == 0 {
-        std::thread::available_parallelism().map_or(1, |v| v.get())
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
     } else {
         n_threads
     };
@@ -197,7 +219,7 @@ pub fn matmul_f32(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: us
     }
 
     // Parallel: split rows of A across threads
-    let rows_per_thread = (m + n_threads - 1) / n_threads;
+    let rows_per_thread = m.div_ceil(n_threads);
 
     // Build row ranges
     let mut ranges = Vec::new();
@@ -227,7 +249,17 @@ pub fn matmul_f32(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: us
 /// Compute a block of the matrix multiplication.
 ///
 /// `c` is a slice starting at row `i_start` of the full output matrix.
-fn matmul_f32_block(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, i_start: usize, i_end: usize, _j_start: usize, j_end: usize) {
+fn matmul_f32_block(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    i_start: usize,
+    i_end: usize,
+    _j_start: usize,
+    j_end: usize,
+) {
     const BLOCK_M: usize = 16;
     const BLOCK_N: usize = 16;
 
@@ -264,7 +296,7 @@ impl CpuBackend {
     pub fn new(n_threads: usize) -> Self {
         Self {
             n_threads: if n_threads == 0 {
-                std::thread::available_parallelism().map_or(1, |n| n.get())
+                std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
             } else {
                 n_threads
             },
@@ -281,8 +313,18 @@ impl CpuBackend {
     /// Panics if the tensor shapes are incompatible for multiplication.
     #[must_use]
     pub fn matmul(&self, a: &Tensor, b: &Tensor) -> Tensor {
-        assert_eq!(a.shape().len(), 2, "matmul requires 2D tensors, got {}D", a.ndim());
-        assert_eq!(b.shape().len(), 2, "matmul requires 2D tensors, got {}D", b.ndim());
+        assert_eq!(
+            a.shape().len(),
+            2,
+            "matmul requires 2D tensors, got {}D",
+            a.ndim()
+        );
+        assert_eq!(
+            b.shape().len(),
+            2,
+            "matmul requires 2D tensors, got {}D",
+            b.ndim()
+        );
         assert_eq!(a.dtype(), DType::F32, "matmul requires F32 tensors");
         assert_eq!(b.dtype(), DType::F32, "matmul requires F32 tensors");
 
@@ -295,8 +337,12 @@ impl CpuBackend {
         // Get raw f32 slices
         let a_bytes = a.data();
         let b_bytes = b.data();
-        let a_f32 = unsafe { std::slice::from_raw_parts(a_bytes.as_ptr().cast::<f32>(), a_bytes.len() / 4) };
-        let b_f32 = unsafe { std::slice::from_raw_parts(b_bytes.as_ptr().cast::<f32>(), b_bytes.len() / 4) };
+        let a_f32 = unsafe {
+            std::slice::from_raw_parts(a_bytes.as_ptr().cast::<f32>(), a_bytes.len() / 4)
+        };
+        let b_f32 = unsafe {
+            std::slice::from_raw_parts(b_bytes.as_ptr().cast::<f32>(), b_bytes.len() / 4)
+        };
 
         let mut c = vec![0.0f32; m * n];
         matmul_f32(a_f32, b_f32, &mut c, m, n, k, self.n_threads);
@@ -311,7 +357,13 @@ impl CpuBackend {
     /// Panics if the tensor shapes don't match.
     #[must_use]
     pub fn add(&self, a: &Tensor, b: &Tensor) -> Tensor {
-        assert_eq!(a.shape(), b.shape(), "addition requires matching shapes: {:?} vs {:?}", a.shape(), b.shape());
+        assert_eq!(
+            a.shape(),
+            b.shape(),
+            "addition requires matching shapes: {:?} vs {:?}",
+            a.shape(),
+            b.shape()
+        );
         Tensor::new(a.dtype(), a.shape())
     }
 

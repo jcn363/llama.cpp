@@ -3,12 +3,13 @@
 //! Usage: `llama-server -m model.gguf --host 0.0.0.0 --port 8080`
 
 #![deny(missing_docs)]
+#![allow(dead_code)]
 
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     routing::{get, post},
-    Json, Router,
 };
 use clap::Parser;
 use llama::{InferenceContext, Model, ModelConfig};

@@ -55,11 +55,11 @@ pub enum DType {
     I32,
     /// 64-bit integer.
     I64,
-    /// 4-bit quantized (Q4_0).
+    /// 4-bit quantized (`Q4_0`).
     Q4_0,
-    /// 4-bit quantized (Q4_1).
+    /// 4-bit quantized (`Q4_1`).
     Q4_1,
-    /// 8-bit quantized (Q8_0).
+    /// 8-bit quantized (`Q8_0`).
     Q8_0,
 }
 
@@ -71,9 +71,8 @@ impl DType {
             DType::F32 | DType::I32 => 4.0,
             DType::F16 | DType::BF16 | DType::I16 => 2.0,
             DType::I64 => 8.0,
-            DType::I8 => 1.0,
+            DType::I8 | DType::Q8_0 => 1.0,
             DType::Q4_0 | DType::Q4_1 => 0.5,
-            DType::Q8_0 => 1.0,
         }
     }
 }
@@ -89,6 +88,11 @@ pub struct Tensor {
 impl Tensor {
     /// Create a new tensor with the given dtype and shape, zero-initialized.
     #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     pub fn new(dtype: DType, shape: &[usize]) -> Self {
         let element_count: usize = shape.iter().product();
         let byte_size = (element_count as f64 * dtype.size_of()).ceil() as usize;
@@ -151,9 +155,8 @@ impl Tensor {
     pub fn from_f32(shape: &[usize], data: &[f32]) -> Self {
         let element_count: usize = shape.iter().product();
         assert_eq!(data.len(), element_count, "data length must match shape");
-        let bytes = unsafe {
-            std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4)
-        };
+        let bytes =
+            unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4) };
         Self {
             dtype: DType::F32,
             shape: shape.to_vec(),
@@ -185,7 +188,7 @@ pub enum GraphOp {
     Mul,
     /// Matrix multiplication.
     MatMul,
-    /// ReLU activation.
+    /// `ReLU` activation.
     Relu,
     /// Softmax activation.
     Softmax,

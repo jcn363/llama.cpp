@@ -15,6 +15,24 @@
 #![deny(missing_docs)]
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::cast_lossless,
+    clippy::cast_possible_wrap,
+    clippy::missing_panics_doc,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::doc_markdown,
+    clippy::uninlined_format_args,
+    clippy::cast_ptr_alignment,
+    clippy::needless_range_loop,
+    clippy::manual_memcpy,
+    clippy::cloned_instead_of_copied,
+    clippy::unnecessary_join,
+    clippy::redundant_closure_for_method_calls
+)]
 
 use gguf::{GgufReader, TensorInfo};
 use thiserror::Error;
@@ -86,9 +104,7 @@ impl ModelArch {
                     gguf::GgufValue::U32(val) => Ok(*val),
                     gguf::GgufValue::U64(val) => Ok(*val as u32),
                     gguf::GgufValue::I32(val) => Ok(*val as u32),
-                    _ => Err(LlamaError::LoadError(format!(
-                        "key {key} has wrong type"
-                    ))),
+                    _ => Err(LlamaError::LoadError(format!("key {key} has wrong type"))),
                 })
         };
 
@@ -99,9 +115,7 @@ impl ModelArch {
                 .and_then(|v| match v {
                     gguf::GgufValue::F32(val) => Ok(*val),
                     gguf::GgufValue::F64(val) => Ok(*val as f32),
-                    _ => Err(LlamaError::LoadError(format!(
-                        "key {key} has wrong type"
-                    ))),
+                    _ => Err(LlamaError::LoadError(format!("key {key} has wrong type"))),
                 })
         };
 
@@ -111,9 +125,7 @@ impl ModelArch {
                 .ok_or_else(|| LlamaError::LoadError(format!("missing key: {key}")))
                 .and_then(|v| match v {
                     gguf::GgufValue::Str(val) => Ok(val.clone()),
-                    _ => Err(LlamaError::LoadError(format!(
-                        "key {key} has wrong type"
-                    ))),
+                    _ => Err(LlamaError::LoadError(format!("key {key} has wrong type"))),
                 })
         };
 
@@ -126,10 +138,9 @@ impl ModelArch {
         let n_layer = get_u32(&format!("{prefix}block_count"))?;
         let n_ff = get_u32(&format!("{prefix}feed_forward_length"))?;
         let n_vocab = get_u32("tokenizer.ggml.tokens")?;
-        let norm_eps = get_f32(&format!("{prefix}attention.layer_norm_rms_epsilon"))
-            .unwrap_or(1e-5);
-        let rope_freq_base =
-            get_f32(&format!("{prefix}rope.freq_base")).unwrap_or(10_000.0);
+        let norm_eps =
+            get_f32(&format!("{prefix}attention.layer_norm_rms_epsilon")).unwrap_or(1e-5);
+        let rope_freq_base = get_f32(&format!("{prefix}rope.freq_base")).unwrap_or(10_000.0);
         let rope_dim = get_u32(&format!("{prefix}rope.dimension_count")).unwrap_or(n_embd / n_head);
 
         Ok(Self {
@@ -600,10 +611,17 @@ impl InferenceContext {
 
             // 4. Output projection (lm_head)
             let lm_head = self.get_tensor_f32("output.weight")?;
-            let logits = mat_vec_batch(&lm_head, &normalized, seq_len, n_embd, arch.n_vocab as usize);
+            let logits = mat_vec_batch(
+                &lm_head,
+                &normalized,
+                seq_len,
+                n_embd,
+                arch.n_vocab as usize,
+            );
 
             // 5. Sample next token (greedy for now)
-            let last_logits = &logits[(seq_len - 1) * arch.n_vocab as usize..seq_len * arch.n_vocab as usize];
+            let last_logits =
+                &logits[(seq_len - 1) * arch.n_vocab as usize..seq_len * arch.n_vocab as usize];
             let next_token = greedy_sample(last_logits);
 
             self.tokens.push(next_token);
@@ -632,10 +650,7 @@ impl InferenceContext {
         let f32_data: Vec<f32> = match tensor.dtype {
             gguf::GgmlType::F32 => {
                 let slice = unsafe {
-                    std::slice::from_raw_parts(
-                        data.as_ptr().cast::<f32>(),
-                        data.len() / 4,
-                    )
+                    std::slice::from_raw_parts(data.as_ptr().cast::<f32>(), data.len() / 4)
                 };
                 slice.to_vec()
             }
@@ -752,11 +767,7 @@ fn apply_rope(
                 let pair_idx = head_offset + i + half_dim;
 
                 let x0 = x[src_idx];
-                let x1 = if pair_idx < d_head {
-                    x[pair_idx]
-                } else {
-                    0.0
-                };
+                let x1 = if pair_idx < d_head { x[pair_idx] } else { 0.0 };
 
                 out[src_idx] = x0 * cos_theta - x1 * sin_theta;
                 if pair_idx < d_head {

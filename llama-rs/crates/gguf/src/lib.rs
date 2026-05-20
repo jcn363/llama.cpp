@@ -41,7 +41,7 @@ use thiserror::Error;
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /// GGUF magic bytes: "GGUF" in little-endian u32.
-pub const GGUF_MAGIC: u32 = 0x46554747;
+pub const GGUF_MAGIC: u32 = 0x4655_4747;
 
 /// Supported GGUF version.
 pub const GGUF_VERSION: u32 = 3;
@@ -460,6 +460,11 @@ impl GgufReader {
     /// # Errors
     ///
     /// Returns [`GgufError`] if the data is not a valid GGUF file.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap
+    )]
     pub fn from_mmap(mmap: memmap2::Mmap) -> GgufResult<Self> {
         let mut reader = CursorReader::new(&mmap);
 
@@ -574,10 +579,7 @@ impl GgufReader {
     /// Returns `None` if the key is not found.
     #[must_use]
     pub fn get_kv(&self, key: &str) -> Option<&GgufValue> {
-        self.kv_pairs
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v)
+        self.kv_pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
     /// Get a metadata key-value pair by index.
@@ -638,12 +640,15 @@ impl GgufReader {
     /// # Errors
     ///
     /// Returns an error if the offset is out of bounds.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn read_tensor_data(&self, tensor: &TensorInfo) -> GgufResult<&[u8]> {
         let start = self.data_offset + tensor.offset as usize;
         if start > self.data.len() {
             return Err(GgufError::DecodeError(format!(
                 "tensor {} offset {} out of bounds (file size {})",
-                tensor.name, tensor.offset, self.data.len()
+                tensor.name,
+                tensor.offset,
+                self.data.len()
             )));
         }
 
@@ -656,11 +661,12 @@ impl GgufReader {
             GgmlType::I8 | GgmlType::Q8_0 | GgmlType::Q8_1 | GgmlType::Q8_K => element_count,
             GgmlType::Q4_0 | GgmlType::Q4_1 => element_count / 2,
             GgmlType::Q5_0 | GgmlType::Q5_1 => (element_count / 2) + (element_count / 32) * 2,
-            GgmlType::Q2_K => element_count / 4 + element_count / 64 + element_count / 64,
-            GgmlType::Q3_K => element_count / 4 + element_count / 64 + element_count / 64,
-            GgmlType::Q4_K => element_count / 2 + element_count / 64 + element_count / 64,
-            GgmlType::Q5_K => element_count / 2 + element_count / 64 + element_count / 64,
-            GgmlType::Q6_K => element_count / 2 + element_count / 64 + element_count / 64,
+            GgmlType::Q2_K | GgmlType::Q3_K => {
+                element_count / 4 + element_count / 64 + element_count / 64
+            }
+            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K => {
+                element_count / 2 + element_count / 64 + element_count / 64
+            }
             GgmlType::Iq2Xxs
             | GgmlType::Iq2Xs
             | GgmlType::Iq3Xxs
@@ -686,7 +692,9 @@ impl GgufReader {
         if end > self.data.len() {
             return Err(GgufError::DecodeError(format!(
                 "tensor {} data extends beyond file (need {}, have {})",
-                tensor.name, end, self.data.len()
+                tensor.name,
+                end,
+                self.data.len()
             )));
         }
 
@@ -728,7 +736,7 @@ impl<'a> CursorReader<'a> {
 
     fn read_i8(&mut self) -> GgufResult<i8> {
         self.ensure(1)?;
-        let v = self.data[self.pos] as i8;
+        let v = i8::from_ne_bytes([self.data[self.pos]]);
         self.pos += 1;
         Ok(v)
     }
@@ -789,6 +797,7 @@ impl<'a> CursorReader<'a> {
         Ok(v)
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn read_string(&mut self) -> GgufResult<String> {
         let len = self.read_u64()? as usize;
         self.ensure(len)?;
@@ -799,6 +808,7 @@ impl<'a> CursorReader<'a> {
         Ok(s)
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn read_value(&mut self, gguf_type: GgufType) -> GgufResult<GgufValue> {
         match gguf_type {
             GgufType::Uint8 => Ok(GgufValue::U8(self.read_u8()?)),
@@ -846,7 +856,10 @@ mod tests {
     #[test]
     fn gguf_magic_constant_should_be_correct() {
         assert_eq!(GGUF_MAGIC, 0x46554747);
-        assert_eq!(core::str::from_utf8(&GGUF_MAGIC.to_le_bytes()).unwrap(), "GGUF");
+        assert_eq!(
+            core::str::from_utf8(&GGUF_MAGIC.to_le_bytes()).unwrap(),
+            "GGUF"
+        );
     }
 
     #[test]

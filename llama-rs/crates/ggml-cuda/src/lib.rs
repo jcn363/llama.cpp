@@ -1,7 +1,7 @@
 //! CUDA backend for ggml, optimized for NVIDIA GTX 1050 (compute 6.1).
 //!
 //! This crate implements tensor operations for CUDA execution, targeting
-//! Pascal architecture (sm_61) with 2GB VRAM constraints.
+//! Pascal architecture (`sm_61`) with 2GB VRAM constraints.
 //!
 //! # Hardware Target
 //!
@@ -22,6 +22,12 @@
 #![deny(missing_docs)]
 #![deny(clippy::all)]
 #![deny(clippy::pedantic)]
+#![allow(
+    clippy::many_single_char_names,
+    dead_code,
+    clippy::unnecessary_lazy_evaluations,
+    clippy::no_effect_underscore_binding
+)]
 
 use ggml::Tensor;
 
@@ -82,9 +88,8 @@ impl CudaBackend {
         {
             use cudarc::driver::{CudaDevice, DevicePtr};
 
-            let device = CudaDevice::new(0).map_err(|e| {
-                CudaError::NotAvailable(format!("failed to initialize CUDA: {e}"))
-            })?;
+            let device = CudaDevice::new(0)
+                .map_err(|e| CudaError::NotAvailable(format!("failed to initialize CUDA: {e}")))?;
 
             let props = device.properties().map_err(|e| {
                 CudaError::NotAvailable(format!("failed to query device properties: {e}"))
@@ -162,11 +167,10 @@ impl CudaBackend {
 
         #[cfg(feature = "cuda")]
         {
-            use cudarc::driver::{CudaDevice, DeviceSlice, DeviceRepr};
+            use cudarc::driver::{CudaDevice, DeviceRepr, DeviceSlice};
 
-            let device = CudaDevice::new(0).map_err(|e| {
-                CudaError::RuntimeError(format!("failed to get CUDA device: {e}"))
-            })?;
+            let device = CudaDevice::new(0)
+                .map_err(|e| CudaError::RuntimeError(format!("failed to get CUDA device: {e}")))?;
 
             let data: &[f32] = bytemuck::cast_slice(tensor.data());
             let dev_data = device
@@ -199,14 +203,12 @@ impl CudaBackend {
     /// Returns [`CudaError::RuntimeError`] if the operation fails.
     pub fn matmul(&self, a: &DeviceTensor, b: &DeviceTensor) -> CudaResult<DeviceTensor> {
         if !self.available {
-            return Err(CudaError::NotAvailable(
-                "CUDA backend not available".into(),
-            ));
+            return Err(CudaError::NotAvailable("CUDA backend not available".into()));
         }
 
-        let m = a.shape[0];
+        let _m = a.shape[0];
         let k = a.shape[1];
-        let n = b.shape[0];
+        let _n = b.shape[0];
         let k2 = b.shape[1];
 
         if k != k2 {
@@ -219,12 +221,14 @@ impl CudaBackend {
         {
             use cudarc::cublas::{CudaBlas, GemmConfig, Transpose};
 
-            let dev_a = a.dev_data.as_ref().ok_or_else(|| {
-                CudaError::RuntimeError("device tensor has no data".into())
-            })?;
-            let dev_b = b.dev_data.as_ref().ok_or_else(|| {
-                CudaError::RuntimeError("device tensor has no data".into())
-            })?;
+            let dev_a = a
+                .dev_data
+                .as_ref()
+                .ok_or_else(|| CudaError::RuntimeError("device tensor has no data".into()))?;
+            let dev_b = b
+                .dev_data
+                .as_ref()
+                .ok_or_else(|| CudaError::RuntimeError("device tensor has no data".into()))?;
 
             let blas = CudaBlas::new(dev_a.device()).map_err(|e| {
                 CudaError::RuntimeError(format!("failed to create cuBLAS handle: {e}"))
@@ -253,9 +257,8 @@ impl CudaBackend {
             };
 
             unsafe {
-                blas.gemm(config, dev_a, dev_b, &dev_c).map_err(|e| {
-                    CudaError::RuntimeError(format!("cuBLAS gemm failed: {e}"))
-                })?;
+                blas.gemm(config, dev_a, dev_b, &dev_c)
+                    .map_err(|e| CudaError::RuntimeError(format!("cuBLAS gemm failed: {e}")))?;
             }
 
             Ok(DeviceTensor {
@@ -268,9 +271,7 @@ impl CudaBackend {
 
         #[cfg(not(feature = "cuda"))]
         {
-            Err(CudaError::NotAvailable(
-                "CUDA feature not enabled".into(),
-            ))
+            Err(CudaError::NotAvailable("CUDA feature not enabled".into()))
         }
     }
 }
@@ -332,9 +333,10 @@ impl DeviceTensor {
     pub fn to_host(&self) -> CudaResult<Vec<f32>> {
         #[cfg(feature = "cuda")]
         {
-            let dev_data = self.dev_data.as_ref().ok_or_else(|| {
-                CudaError::RuntimeError("device tensor has no data".into())
-            })?;
+            let dev_data = self
+                .dev_data
+                .as_ref()
+                .ok_or_else(|| CudaError::RuntimeError("device tensor has no data".into()))?;
 
             let host_data = dev_data
                 .device()
@@ -346,9 +348,7 @@ impl DeviceTensor {
 
         #[cfg(not(feature = "cuda"))]
         {
-            Err(CudaError::NotAvailable(
-                "CUDA feature not enabled".into(),
-            ))
+            Err(CudaError::NotAvailable("CUDA feature not enabled".into()))
         }
     }
 }
