@@ -789,7 +789,7 @@ impl InferenceContext {
             .read_tensor_data(tensor)
             .map_err(|e| LlamaError::LoadError(format!("failed to read tensor {name}: {e}")))?;
 
-        // Convert bytes to f32 (assuming F32 or F16)
+        // Convert bytes to f32 based on tensor dtype
         let f32_data: Vec<f32> = match tensor.dtype {
             gguf::GgmlType::F32 => {
                 let slice = unsafe {
@@ -806,6 +806,8 @@ impl InferenceContext {
                 }
                 result
             }
+            gguf::GgmlType::Q4_0 => dequantize_q4_0(&data, tensor.shape.first().copied().unwrap_or(0) as usize),
+            gguf::GgmlType::Q8_0 => dequantize_q8_0(&data, tensor.shape.first().copied().unwrap_or(0) as usize),
             _ => {
                 return Err(LlamaError::LoadError(format!(
                     "unsupported tensor dtype for {name}: {:?}",
@@ -1152,6 +1154,68 @@ fn f16_to_f32(bits: u16) -> f32 {
     f32::from_bits((sign << 31) | (new_exp << 23) | new_mantissa)
 }
 
+/// Q4_0 block size (number of elements per block).
+const QK4_0: usize = 32;
+/// Q4_0 block size in bytes: 2 (f16 scale) + 16 (4-bit values) = 18.
+const Q4_0_BLOCK_SIZE: usize = 18;
+
+/// Dequantize Q4_0 tensor data to f32.
+///
+/// Q4_0 format: 4-bit quantization with block size 32.
+/// Each block: 2 bytes (f16 scale) + 16 bytes (4-bit values, 2 per byte).
+/// Dequantization: val[i] = scale * (q[i] - 8)
+fn dequantize_q4_0(data: &[u8], n_elements: usize) -> Vec<f32> {
+    let n_blocks = n_elements / QK4_0;
+    let mut result = Vec::with_capacity(n_elements);
+
+    for block_idx in 0..n_blocks {
+        let block_start = block_idx * Q4_0_BLOCK_SIZE;
+        let scale_bytes = &data[block_start..block_start + 2];
+        let scale = f16_to_f32(u16::from_le_bytes([scale_bytes[0], scale_bytes[1]]));
+
+        let qs = &data[block_start + 2..block_start + Q4_0_BLOCK_SIZE];
+
+        for i in 0..16 {
+            let byte = qs[i];
+            let q0 = (byte & 0x0F) as i8;
+            let q1 = (byte >> 4) as i8;
+            result.push(scale * (q0 as f32 - 8.0));
+            result.push(scale * (q1 as f32 - 8.0));
+        }
+    }
+
+    result
+}
+
+/// Q8_0 block size (number of elements per block).
+const QK8_0: usize = 32;
+/// Q8_0 block size in bytes: 2 (f16 scale) + 32 (8-bit values) = 34.
+const Q8_0_BLOCK_SIZE: usize = 34;
+
+/// Dequantize Q8_0 tensor data to f32.
+///
+/// Q8_0 format: 8-bit quantization with block size 32.
+/// Each block: 2 bytes (f16 scale) + 32 bytes (8-bit signed values).
+/// Dequantization: val[i] = scale * q[i]
+fn dequantize_q8_0(data: &[u8], n_elements: usize) -> Vec<f32> {
+    let n_blocks = n_elements / QK8_0;
+    let mut result = Vec::with_capacity(n_elements);
+
+    for block_idx in 0..n_blocks {
+        let block_start = block_idx * Q8_0_BLOCK_SIZE;
+        let scale_bytes = &data[block_start..block_start + 2];
+        let scale = f16_to_f32(u16::from_le_bytes([scale_bytes[0], scale_bytes[1]]));
+
+        let qs = &data[block_start + 2..block_start + Q8_0_BLOCK_SIZE];
+
+        for &q in qs {
+            result.push(scale * (q as i8) as f32);
+        }
+    }
+
+    result
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1349,5 +1413,65 @@ mod tests {
 
         assert!((y[0] - 17.0).abs() < 0.001);
         assert!((y[1] - 39.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn dequantize_q4_0_should_recover_values() {
+        // Build a Q4_0 block with scale=1.0 and values that should dequantize to [-8, -7, ..., 23]
+        // q[i] stored as (val/scale + 8), so for scale=1.0:
+        // val=-8 -> q=0, val=-7 -> q=1, ..., val=7 -> q=15
+        // Block: scale (f16 1.0 = 0x3C00) + 16 bytes of 4-bit values
+        let mut block = vec![0u8; Q4_0_BLOCK_SIZE];
+        // Scale = 1.0 in f16
+        block[0] = 0x00;
+        block[1] = 0x3C;
+
+        // Fill with values 0..15 repeated (will dequantize to -8..7)
+        for i in 0..16 {
+            block[2 + i] = (i as u8) | ((i as u8) << 4);
+        }
+
+        let result = dequantize_q4_0(&block, QK4_0);
+        assert_eq!(result.len(), QK4_0);
+
+        // First two values: q=0 -> -8, q=0 -> -8
+        assert!((result[0] - (-8.0)).abs() < 0.001);
+        assert!((result[1] - (-8.0)).abs() < 0.001);
+        // Last two values: q=15 -> 7, q=15 -> 7
+        assert!((result[30] - 7.0).abs() < 0.001);
+        assert!((result[31] - 7.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn dequantize_q8_0_should_recover_values() {
+        // Build a Q8_0 block with scale=0.1 and values 0..31
+        // val[i] = scale * q[i], so for scale=0.1: val = 0, 0.1, 0.2, ..., 3.1
+        let mut block = vec![0u8; Q8_0_BLOCK_SIZE];
+        // Scale = 0.1 in f16 ≈ 0x2E66 (need to compute)
+        // 0.1 in f32 = 0x3DCCCCCD, in f16 ≈ 0x2E66
+        let scale_f32 = 0.1f32;
+        // Convert f32 to f16 (approximate)
+        let bits = scale_f32.to_bits();
+        let sign = (bits >> 31) as u16;
+        let exp = ((bits >> 23) & 0xFF) as i32;
+        let mantissa = bits & 0x7FFFFF;
+        let f16_exp = (exp - 127 + 15) as u16;
+        let f16_mantissa = (mantissa >> 13) as u16;
+        let f16_bits = (sign << 15) | (f16_exp << 10) | f16_mantissa;
+        block[0] = f16_bits as u8;
+        block[1] = (f16_bits >> 8) as u8;
+
+        // Fill with values 0..31 as int8
+        for i in 0..32 {
+            block[2 + i] = i as u8;
+        }
+
+        let result = dequantize_q8_0(&block, QK8_0);
+        assert_eq!(result.len(), QK8_0);
+
+        // First value: 0.1 * 0 = 0
+        assert!(result[0].abs() < 0.01);
+        // Last value: 0.1 * 31 = 3.1
+        assert!((result[31] - 3.1).abs() < 0.01);
     }
 }
