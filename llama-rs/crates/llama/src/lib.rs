@@ -462,6 +462,14 @@ impl Model {
                     let n_elements = elements as usize;
                     dequantize_q8_0(&data, n_elements)
                 }
+                gguf::GgmlType::Q2_K => {
+                    let n_elements = elements as usize;
+                    dequantize_q2_k(&data, n_elements)
+                }
+                gguf::GgmlType::Q3_K => {
+                    let n_elements = elements as usize;
+                    dequantize_q3_k(&data, n_elements)
+                }
                 gguf::GgmlType::Q4_K => {
                     let n_elements = elements as usize;
                     dequantize_q4_k(&data, n_elements)
@@ -1522,6 +1530,145 @@ fn dequantize_q6_k(data: &[u8], n_elements: usize) -> Vec<f32> {
                 let q_full = q | (qh_bit << 4);
                 result.push(d * (scales[scale_idx] as i8 as f32) * (q_full as f32 - 32.0));
             }
+        }
+    }
+
+    result
+}
+
+/// Q2_K block size in bytes: 4 (d+dmin) + 16 (scales) + 64 (qs) = 84.
+const Q2_K_BLOCK_SIZE: usize = 84;
+
+/// Dequantize Q2_K tensor data to f32.
+///
+/// Q2_K format: 2-bit quantization with super-block size 256.
+/// Each super-block: 2 bytes (f16 d) + 2 bytes (f16 dmin) + 16 bytes (scales) + 64 bytes (qs).
+/// Dequantization: val[i] = d * scale[sub] * qs[i] - dmin * min[sub]
+fn dequantize_q2_k(data: &[u8], n_elements: usize) -> Vec<f32> {
+    let n_blocks = n_elements / QK_K;
+    let mut result = Vec::with_capacity(n_elements);
+
+    for block_idx in 0..n_blocks {
+        let block_start = block_idx * Q2_K_BLOCK_SIZE;
+        let d = f16_to_f32(u16::from_le_bytes([
+            data[block_start],
+            data[block_start + 1],
+        ]));
+        let dmin = f16_to_f32(u16::from_le_bytes([
+            data[block_start + 2],
+            data[block_start + 3],
+        ]));
+
+        let scales = &data[block_start + 4..block_start + 20];
+        let qs = &data[block_start + 20..block_start + Q2_K_BLOCK_SIZE];
+
+        let mut is = 0;
+        let mut q_offset = 0;
+
+        for _n in 0..2 {
+            // Process 128 elements at a time
+            let mut shift = 0;
+            for _j in 0..4 {
+                let sc = scales[is];
+                is += 1;
+                let dl = d * (sc & 0xF) as f32;
+                let ml = dmin * (sc >> 4) as f32;
+                for l in 0..16 {
+                    let q = (qs[q_offset + l] >> shift) & 3;
+                    result.push(dl * q as f32 - ml);
+                }
+
+                let sc = scales[is];
+                is += 1;
+                let dl = d * (sc & 0xF) as f32;
+                let ml = dmin * (sc >> 4) as f32;
+                for l in 0..16 {
+                    let q = (qs[q_offset + 16 + l] >> shift) & 3;
+                    result.push(dl * q as f32 - ml);
+                }
+
+                shift += 2;
+            }
+            q_offset += 32;
+        }
+    }
+
+    result
+}
+
+/// Q3_K block size in bytes: 2 (d) + 64 (qs) + 32 (hmask) + 12 (scales) = 110.
+const Q3_K_BLOCK_SIZE: usize = 110;
+
+/// Dequantize Q3_K tensor data to f32.
+///
+/// Q3_K format: 3-bit quantization with super-block size 256.
+/// Each super-block: 2 bytes (f16 d) + 64 bytes (qs) + 32 bytes (hmask) + 12 bytes (scales).
+/// Dequantization: val[i] = d * (scales[sub] - 32) * (qs[i] - (hmask[i] ? 0 : 4))
+fn dequantize_q3_k(data: &[u8], n_elements: usize) -> Vec<f32> {
+    let n_blocks = n_elements / QK_K;
+    let mut result = Vec::with_capacity(n_elements);
+
+    for block_idx in 0..n_blocks {
+        let block_start = block_idx * Q3_K_BLOCK_SIZE;
+        let d = f16_to_f32(u16::from_le_bytes([
+            data[block_start],
+            data[block_start + 1],
+        ]));
+
+        let qs = &data[block_start + 2..block_start + 66];
+        let hmask = &data[block_start + 66..block_start + 98];
+        let scales_raw = &data[block_start + 98..block_start + 110];
+
+        // Unpack scales from 6-bit format
+        let kmask1: u32 = 0x03030303;
+        let kmask2: u32 = 0x0f0f0f0f;
+
+        let mut aux = [0u32; 4];
+        aux[0] = u32::from_le_bytes([scales_raw[0], scales_raw[1], scales_raw[2], scales_raw[3]]);
+        aux[1] = u32::from_le_bytes([scales_raw[4], scales_raw[5], scales_raw[6], scales_raw[7]]);
+        aux[2] = u32::from_le_bytes([scales_raw[8], scales_raw[9], scales_raw[10], scales_raw[11]]);
+        aux[3] = 0;
+
+        let tmp = aux[2];
+        aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+        aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+        aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+        aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+
+        // Convert to signed bytes
+        let scales: [i8; 16] = std::array::from_fn(|i| {
+            let byte_idx = i / 4;
+            let bit_idx = (i % 4) * 8;
+            ((aux[byte_idx] >> bit_idx) & 0xFF) as i8
+        });
+
+        let mut is = 0;
+        let mut q_offset = 0;
+        let mut m: u8 = 1;
+
+        for _n in 0..2 {
+            let mut shift = 0;
+            for _j in 0..4 {
+                let dl = d * (scales[is] as f32 - 32.0);
+                is += 1;
+                for l in 0..16 {
+                    let q = ((qs[q_offset + l] >> shift) & 3) as i8;
+                    let h = if hmask[l] & m != 0 { 0i8 } else { 4 };
+                    result.push(dl * (q - h) as f32);
+                }
+
+                let dl = d * (scales[is] as f32 - 32.0);
+                is += 1;
+                for l in 0..16 {
+                    let q = ((qs[q_offset + 16 + l] >> shift) & 3) as i8;
+                    let h = if hmask[16 + l] & m != 0 { 0i8 } else { 4 };
+                    result.push(dl * (q - h) as f32);
+                }
+
+                shift += 2;
+                m <<= 1;
+            }
+            q_offset += 32;
         }
     }
 
