@@ -370,6 +370,7 @@ fn format_params(n: u64) -> String {
 // ─── Inference ──────────────────────────────────────────────────────────────
 
 /// Configuration for model inference.
+#[derive(Clone)]
 pub struct ModelConfig {
     /// Number of CPU threads to use.
     pub n_threads: usize,
@@ -443,6 +444,23 @@ impl InferenceContext {
     #[must_use]
     pub fn tokens(&self) -> &[u32] {
         &self.tokens
+    }
+
+    /// Decode a single token ID to its string representation.
+    #[must_use]
+    pub fn decode_from_id(&self, token_id: u32) -> String {
+        self.model
+            .tokenizer
+            .tokens
+            .get(token_id as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("<unk:{token_id}>"))
+    }
+
+    /// Decode all tokens to a string.
+    #[must_use]
+    pub fn decode(&self) -> String {
+        self.model.tokenizer.decode(&self.tokens)
     }
 
     /// Run inference for n_predict tokens.

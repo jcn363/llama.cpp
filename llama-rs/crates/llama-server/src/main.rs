@@ -4,9 +4,16 @@
 
 #![deny(missing_docs)]
 
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
 use clap::Parser;
+use llama::{InferenceContext, Model, ModelConfig};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 /// Command-line arguments for llama-server.
@@ -28,13 +35,17 @@ struct Args {
     /// Number of threads.
     #[arg(short = 't', long, default_value_t = 0)]
     threads: usize,
+
+    /// Context size.
+    #[arg(short = 'c', long, default_value_t = 512)]
+    ctx_size: usize,
 }
 
 /// Shared server state.
 #[derive(Clone)]
 struct ServerState {
-    #[allow(dead_code)]
-    model_path: String,
+    model: Arc<Model>,
+    config: ModelConfig,
 }
 
 /// Completion request body.
@@ -42,18 +53,27 @@ struct ServerState {
 struct CompletionRequest {
     prompt: String,
     #[serde(default = "default_max_tokens")]
-    #[allow(dead_code)]
     max_tokens: usize,
+    #[serde(default)]
+    stream: bool,
+    #[serde(default = "default_temperature")]
+    temperature: f32,
 }
 
 fn default_max_tokens() -> usize {
     128
 }
 
+fn default_temperature() -> f32 {
+    0.8
+}
+
 /// Completion response body.
 #[derive(Serialize)]
 struct CompletionResponse {
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 #[tokio::main]
@@ -64,14 +84,28 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::new("info"))
         .init();
 
-    tracing::info!("Starting server on {}:{}", args.host, args.port);
     tracing::info!("Loading model from: {}", args.model);
+    let model = Model::from_file(&args.model)?;
+    tracing::info!("{}", model.summary());
+
+    let config = ModelConfig {
+        n_threads: if args.threads == 0 {
+            std::thread::available_parallelism().map_or(1, |n| n.get())
+        } else {
+            args.threads
+        },
+        use_cuda: false,
+        n_ctx: args.ctx_size,
+        n_batch: args.ctx_size,
+    };
 
     let state = ServerState {
-        model_path: args.model,
+        model: Arc::new(model),
+        config,
     };
 
     let app = Router::new()
+        .route("/health", get(handle_health))
         .route("/completion", post(handle_completion))
         .with_state(state);
 
@@ -84,12 +118,55 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn handle_health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
 async fn handle_completion(
-    State(_state): State<ServerState>,
+    State(state): State<ServerState>,
     Json(request): Json<CompletionRequest>,
 ) -> Result<Json<CompletionResponse>, (StatusCode, String)> {
-    tracing::info!("Completion request: prompt_len={}", request.prompt.len());
+    tracing::info!(
+        "Completion request: prompt_len={}, max_tokens={}, stream={}",
+        request.prompt.len(),
+        request.max_tokens,
+        request.stream
+    );
 
-    // TODO(#6): Implement actual inference
-    Err((StatusCode::NOT_IMPLEMENTED, "inference not yet implemented".into()))
+    if request.stream {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "streaming not yet implemented".into(),
+        ));
+    }
+
+    // Clone Arc for inference (Model is behind Arc, InferenceContext takes ownership)
+    // We need to clone the model data — for now, reload from file
+    // TODO: Implement shared model weights with Arc
+    let model = Model::from_file(state.model.path()).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("model reload error: {e}"),
+        )
+    })?;
+
+    let mut ctx = InferenceContext::new(model, state.config.clone());
+    ctx.encode(&request.prompt);
+
+    let generated = ctx.generate(request.max_tokens).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("inference error: {e}"),
+        )
+    })?;
+
+    let content = generated
+        .iter()
+        .map(|&id| ctx.decode_from_id(id))
+        .collect::<String>();
+
+    Ok(Json(CompletionResponse {
+        content,
+        model: Some(state.model.summary()),
+    }))
 }
