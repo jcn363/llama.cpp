@@ -98,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         use_cuda: false,
         n_ctx: args.ctx_size,
         n_batch: args.ctx_size,
+        ..Default::default()
     };
 
     let state = ServerState {

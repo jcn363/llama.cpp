@@ -391,6 +391,14 @@ pub struct ModelConfig {
     pub n_ctx: usize,
     /// Batch size for prompt processing.
     pub n_batch: usize,
+    /// Sampling temperature (0.0 = greedy).
+    pub temperature: f32,
+    /// Top-k filtering (0 = disabled).
+    pub top_k: usize,
+    /// Top-p (nucleus) filtering (0.0 = disabled, 1.0 = disabled).
+    pub top_p: f32,
+    /// Random seed for sampling.
+    pub seed: u64,
 }
 
 impl Default for ModelConfig {
@@ -400,6 +408,10 @@ impl Default for ModelConfig {
             use_cuda: false,
             n_ctx: 512,
             n_batch: 512,
+            temperature: 0.8,
+            top_k: 40,
+            top_p: 0.95,
+            seed: 42,
         }
     }
 }
@@ -619,10 +631,16 @@ impl InferenceContext {
                 arch.n_vocab as usize,
             );
 
-            // 5. Sample next token (greedy for now)
+            // 5. Sample next token
             let last_logits =
                 &logits[(seq_len - 1) * arch.n_vocab as usize..seq_len * arch.n_vocab as usize];
-            let next_token = greedy_sample(last_logits);
+            let next_token = sample_token(
+                last_logits,
+                self.config.temperature,
+                self.config.top_k,
+                self.config.top_p,
+                self.config.seed,
+            );
 
             self.tokens.push(next_token);
             generated.push(next_token);
@@ -860,6 +878,124 @@ fn greedy_sample(logits: &[f32]) -> u32 {
     max_idx as u32
 }
 
+/// Apply softmax to logits in-place and return probabilities.
+fn softmax(logits: &mut [f32]) {
+    let max_val = logits
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let mut sum = 0.0f32;
+    for logit in logits.iter_mut() {
+        *logit = (*logit - max_val).exp();
+        sum += *logit;
+    }
+    for logit in logits.iter_mut() {
+        *logit /= sum;
+    }
+}
+
+/// Apply temperature scaling to logits.
+fn apply_temperature(logits: &mut [f32], temperature: f32) {
+    if temperature <= 0.0 || (temperature - 1.0).abs() < 1e-8 {
+        return;
+    }
+    for logit in logits.iter_mut() {
+        *logit /= temperature;
+    }
+}
+
+/// Apply top-k filtering: keep only the k largest logits, zero out the rest.
+fn apply_top_k(logits: &mut [f32], k: usize) {
+    if k >= logits.len() || k == 0 {
+        return;
+    }
+
+    // Find the k-th largest value
+    let mut sorted: Vec<f32> = logits.to_vec();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let threshold = sorted[k - 1];
+
+    for logit in logits.iter_mut() {
+        if *logit < threshold {
+            *logit = f32::NEG_INFINITY;
+        }
+    }
+}
+
+/// Apply nucleus (top-p) sampling: keep only the smallest set of tokens
+/// whose cumulative probability exceeds p.
+fn apply_top_p(logits: &mut [f32], p: f32) {
+    if p >= 1.0 || p <= 0.0 {
+        return;
+    }
+
+    // Create index-value pairs and sort by probability descending
+    let mut indexed: Vec<(usize, f32)> = logits.iter().cloned().enumerate().collect();
+    indexed.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut cumulative = 0.0f32;
+    let mut cutoff_idx = indexed.len();
+
+    for (i, (_, prob)) in indexed.iter().enumerate() {
+        cumulative += prob;
+        if cumulative > p {
+            cutoff_idx = i + 1;
+            break;
+        }
+    }
+
+    // Zero out tokens beyond the cutoff
+    let threshold = indexed[cutoff_idx - 1].1;
+    for logit in logits.iter_mut() {
+        if *logit < threshold {
+            *logit = f32::NEG_INFINITY;
+        }
+    }
+
+    // Re-normalize
+    softmax(logits);
+}
+
+/// Sample a token ID from a categorical distribution.
+fn categorical_sample(probs: &[f32], rng: &mut u64) -> u32 {
+    // Simple LCG random number generator
+    *rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+    let rand_val = ((*rng >> 33) as f64 / (u32::MAX as f64)) as f32;
+
+    let mut cumulative = 0.0f32;
+    for (i, &prob) in probs.iter().enumerate() {
+        cumulative += prob;
+        if rand_val < cumulative {
+            return i as u32;
+        }
+    }
+    (probs.len() - 1) as u32
+}
+
+/// Sample a token from logits with temperature and optional top-k/top-p filtering.
+fn sample_token(logits: &[f32], temperature: f32, top_k: usize, top_p: f32, seed: u64) -> u32 {
+    if temperature <= 0.0 {
+        return greedy_sample(logits);
+    }
+
+    let mut probs = logits.to_vec();
+    apply_temperature(&mut probs, temperature);
+
+    if top_k > 0 {
+        apply_top_k(&mut probs, top_k);
+    }
+
+    softmax(&mut probs);
+
+    if top_p > 0.0 && top_p < 1.0 {
+        apply_top_p(&mut probs, top_p);
+    }
+
+    let mut rng = seed;
+    categorical_sample(&probs, &mut rng)
+}
+
 /// Convert F16 (IEEE 754-2008 binary16) to F32.
 fn f16_to_f32(bits: u16) -> f32 {
     let sign = (bits >> 15) as u32;
@@ -967,6 +1103,60 @@ mod tests {
     fn greedy_sample_should_handle_negative() {
         let logits = vec![-1.0, -0.5, -2.0, -0.1];
         assert_eq!(greedy_sample(&logits), 3);
+    }
+
+    #[test]
+    fn softmax_should_normalize_correctly() {
+        let mut logits = vec![1.0, 2.0, 3.0];
+        softmax(&mut logits);
+
+        // Check probabilities sum to 1
+        let sum: f32 = logits.iter().sum();
+        assert!((sum - 1.0).abs() < 0.001);
+
+        // Check ordering is preserved (higher logit → higher prob)
+        assert!(logits[2] > logits[1]);
+        assert!(logits[1] > logits[0]);
+    }
+
+    #[test]
+    fn apply_temperature_should_scale_logits() {
+        let mut logits = vec![1.0, 2.0, 3.0];
+        apply_temperature(&mut logits, 2.0);
+
+        assert!((logits[0] - 0.5).abs() < 0.001);
+        assert!((logits[1] - 1.0).abs() < 0.001);
+        assert!((logits[2] - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn apply_temperature_should_not_change_at_1() {
+        let mut logits = vec![1.0, 2.0, 3.0];
+        apply_temperature(&mut logits, 1.0);
+
+        assert!((logits[0] - 1.0).abs() < 0.001);
+        assert!((logits[1] - 2.0).abs() < 0.001);
+        assert!((logits[2] - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn apply_top_k_should_keep_top_k() {
+        let mut logits = vec![1.0, 5.0, 3.0, 2.0, 4.0];
+        apply_top_k(&mut logits, 2);
+
+        // Only top 2 should remain, others should be -inf
+        assert!(logits[1] > f32::NEG_INFINITY); // 5.0
+        assert!(logits[4] > f32::NEG_INFINITY); // 4.0
+        assert_eq!(logits[0], f32::NEG_INFINITY);
+        assert_eq!(logits[2], f32::NEG_INFINITY);
+        assert_eq!(logits[3], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn sample_token_with_zero_temperature_should_be_greedy() {
+        let logits = vec![0.1, 0.5, 0.9, 0.3];
+        let token = sample_token(&logits, 0.0, 0, 0.0, 42);
+        assert_eq!(token, 2);
     }
 
     #[test]

@@ -1038,4 +1038,122 @@ mod tests {
         let offset = reader.read_u64().unwrap();
         assert_eq!(offset, 0);
     }
+
+    #[test]
+    fn should_parse_realistic_llama_gguf() {
+        // Build a realistic GGUF file with llama architecture metadata
+        // and tensor info, then parse it with GgufReader via mmap
+        let mut data = Vec::new();
+
+        // Header
+        data.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        data.extend_from_slice(&GGUF_VERSION.to_le_bytes());
+        data.extend_from_slice(&2i64.to_le_bytes()); // 2 tensors
+        data.extend_from_slice(&5i64.to_le_bytes()); // 5 KV pairs
+
+        // KV pairs
+        fn write_kv_string(data: &mut Vec<u8>, key: &str, val: &str) {
+            data.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            data.extend_from_slice(key.as_bytes());
+            data.extend_from_slice(&(GgufType::String as i32).to_le_bytes());
+            data.extend_from_slice(&(val.len() as u64).to_le_bytes());
+            data.extend_from_slice(val.as_bytes());
+        }
+
+        fn write_kv_u32(data: &mut Vec<u8>, key: &str, val: u32) {
+            data.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            data.extend_from_slice(key.as_bytes());
+            data.extend_from_slice(&(GgufType::Uint32 as i32).to_le_bytes());
+            data.extend_from_slice(&val.to_le_bytes());
+        }
+
+        fn write_kv_f32(data: &mut Vec<u8>, key: &str, val: f32) {
+            data.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            data.extend_from_slice(key.as_bytes());
+            data.extend_from_slice(&(GgufType::Float32 as i32).to_le_bytes());
+            data.extend_from_slice(&val.to_le_bytes());
+        }
+
+        write_kv_string(&mut data, "general.architecture", "llama");
+        write_kv_u32(&mut data, "llama.embedding_length", 256);
+        write_kv_u32(&mut data, "llama.attention.head_count", 8);
+        write_kv_u32(&mut data, "llama.block_count", 4);
+        write_kv_f32(&mut data, "llama.attention.layer_norm_rms_epsilon", 1e-5);
+
+        // Tensor info (comes after KV pairs)
+        let tensor1_name = "token_embd.weight";
+        data.extend_from_slice(&(tensor1_name.len() as u64).to_le_bytes());
+        data.extend_from_slice(tensor1_name.as_bytes());
+        data.extend_from_slice(&2u32.to_le_bytes()); // 2 dims
+        data.extend_from_slice(&256i64.to_le_bytes());
+        data.extend_from_slice(&4096i64.to_le_bytes());
+        data.extend_from_slice(&(GgmlType::F32 as i32).to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes()); // offset 0
+
+        let tensor2_name = "output.weight";
+        data.extend_from_slice(&(tensor2_name.len() as u64).to_le_bytes());
+        data.extend_from_slice(tensor2_name.as_bytes());
+        data.extend_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(&256i64.to_le_bytes());
+        data.extend_from_slice(&4096i64.to_le_bytes());
+        data.extend_from_slice(&(GgmlType::F16 as i32).to_le_bytes());
+        // offset = size of tensor 1 data (256 * 4096 * 4 bytes), aligned to 32
+        let t1_size = 256 * 4096 * 4;
+        let t1_aligned = (t1_size + 31) & !31;
+        data.extend_from_slice(&(t1_aligned as u64).to_le_bytes());
+
+        // Pad to alignment for tensor data section
+        let tensor_data_start = data.len();
+        let aligned_data_start = (tensor_data_start + 31) & !31;
+        while data.len() < aligned_data_start {
+            data.push(0);
+        }
+
+        // Write dummy tensor data
+        // Tensor 1: 256 * 4096 * 4 bytes (F32)
+        let t1_size = 256 * 4096 * 4;
+        data.resize(data.len() + t1_size, 0);
+
+        // Tensor 2: 256 * 4096 * 2 bytes (F16)
+        let t2_size = 256 * 4096 * 2;
+        data.resize(data.len() + t2_size, 0);
+
+        // Parse with GgufReader
+        let mut file = std::fs::File::create("/tmp/test_llama.gguf").unwrap();
+        use std::io::Write;
+        file.write_all(&data).unwrap();
+        drop(file);
+
+        let reader = GgufReader::from_file("/tmp/test_llama.gguf").unwrap();
+
+        // Verify metadata
+        assert_eq!(reader.tensor_count(), 2);
+        assert_eq!(reader.metadata_count(), 5);
+
+        let arch = reader.get_kv("general.architecture").unwrap();
+        if let GgufValue::Str(s) = arch {
+            assert_eq!(s, "llama");
+        } else {
+            panic!("expected string");
+        }
+
+        let embd = reader.get_kv("llama.embedding_length").unwrap();
+        if let GgufValue::U32(v) = embd {
+            assert_eq!(*v, 256);
+        } else {
+            panic!("expected u32");
+        }
+
+        // Verify tensors
+        let t1 = reader.find_tensor("token_embd.weight").unwrap();
+        assert_eq!(t1.shape, vec![256, 4096]);
+        assert_eq!(t1.dtype, GgmlType::F32);
+
+        let t2 = reader.find_tensor("output.weight").unwrap();
+        assert_eq!(t2.shape, vec![256, 4096]);
+        assert_eq!(t2.dtype, GgmlType::F16);
+
+        // Clean up
+        let _ = std::fs::remove_file("/tmp/test_llama.gguf");
+    }
 }
