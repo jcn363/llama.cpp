@@ -9,9 +9,12 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
+    response::sse::{Event, Sse},
     routing::{get, post},
 };
 use clap::Parser;
+use futures::stream::Stream;
+use futures::StreamExt;
 use llama::{InferenceContext, Model, ModelConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -77,6 +80,13 @@ struct CompletionResponse {
     model: Option<String>,
 }
 
+/// Streaming chunk response.
+#[derive(Serialize)]
+struct StreamChunk {
+    content: String,
+    stop: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -127,7 +137,7 @@ async fn handle_health() -> Json<serde_json::Value> {
 async fn handle_completion(
     State(state): State<ServerState>,
     Json(request): Json<CompletionRequest>,
-) -> Result<Json<CompletionResponse>, (StatusCode, String)> {
+) -> Result<impl axum::response::IntoResponse, (StatusCode, String)> {
     tracing::info!(
         "Completion request: prompt_len={}, max_tokens={}, stream={}",
         request.prompt.len(),
@@ -136,13 +146,12 @@ async fn handle_completion(
     );
 
     if request.stream {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            "streaming not yet implemented".into(),
+        return Ok(axum::response::IntoResponse::into_response(
+            handle_streaming(state, request).await,
         ));
     }
 
-    // Clone Arc for inference — shares the same model weights without reloading
+    // Non-streaming: generate all tokens then return
     let model = Arc::clone(&state.model);
 
     let mut ctx = InferenceContext::new(model, state.config.clone());
@@ -160,8 +169,65 @@ async fn handle_completion(
         .map(|&id| ctx.decode_from_id(id))
         .collect::<String>();
 
-    Ok(Json(CompletionResponse {
-        content,
-        model: Some(state.model.summary()),
-    }))
+    Ok(axum::response::IntoResponse::into_response(Json(
+        CompletionResponse {
+            content,
+            model: Some(state.model.summary()),
+        },
+    )))
+}
+
+async fn handle_streaming(
+    state: ServerState,
+    request: CompletionRequest,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let model = Arc::clone(&state.model);
+    let config = state.config.clone();
+    let prompt = request.prompt;
+    let max_tokens = request.max_tokens;
+
+    // Run inference in a blocking thread pool
+    let stream = tokio::task::spawn_blocking(move || {
+        let mut ctx = InferenceContext::new(model, config);
+        ctx.encode(&prompt);
+
+        let mut chunks = Vec::new();
+
+        // Generate tokens one at a time
+        for _ in 0..max_tokens {
+            let generated = match ctx.generate(1) {
+                Ok(tokens) => tokens,
+                Err(_) => break,
+            };
+
+            if generated.is_empty() {
+                break;
+            }
+
+            let token_id = generated[0];
+            let content = ctx.decode_from_id(token_id);
+            chunks.push(StreamChunk {
+                content,
+                stop: false,
+            });
+        }
+
+        // Add final stop chunk
+        chunks.push(StreamChunk {
+            content: String::new(),
+            stop: true,
+        });
+
+        chunks
+    })
+    .await
+    .unwrap_or_default();
+
+    // Convert to SSE stream
+    let event_stream = futures::stream::iter(stream).map(|chunk| {
+        let data = serde_json::to_string(&chunk).unwrap_or_default();
+        Ok(Event::default().data(data))
+    });
+
+    Sse::new(event_stream)
 }
