@@ -35,6 +35,7 @@
 )]
 
 use gguf::{GgufReader, TensorInfo};
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -400,6 +401,8 @@ pub struct Model {
     tokenizer: Tokenizer,
     /// Number of parameters.
     parameter_count: u64,
+    /// Cached weights (loaded and dequantized once at load time).
+    weights: HashMap<String, Vec<f32>>,
 }
 
 impl Model {
@@ -415,11 +418,51 @@ impl Model {
         let arch = ModelArch::from_gguf(&reader)?;
         let tokenizer = Tokenizer::from_gguf(&reader)?;
 
-        // Count parameters from tensor info
+        // Count parameters from tensor info and load weights
         let mut param_count: u64 = 0;
+        let mut weights = HashMap::new();
+
         for tensor in reader.tensors() {
             let elements: u64 = tensor.shape.iter().map(|&d| d as u64).product();
             param_count += elements;
+
+            // Load and dequantize tensor data
+            let data = reader.read_tensor_data(tensor).map_err(|e| {
+                LlamaError::LoadError(format!("failed to read tensor {}: {e}", tensor.name))
+            })?;
+
+            let f32_data = match tensor.dtype {
+                gguf::GgmlType::F32 => {
+                    let slice = unsafe {
+                        std::slice::from_raw_parts(data.as_ptr().cast::<f32>(), data.len() / 4)
+                    };
+                    slice.to_vec()
+                }
+                gguf::GgmlType::F16 => {
+                    let mut result = Vec::with_capacity(data.len() / 2);
+                    for i in (0..data.len()).step_by(2) {
+                        let bits = u16::from_le_bytes([data[i], data[i + 1]]);
+                        result.push(f16_to_f32(bits));
+                    }
+                    result
+                }
+                gguf::GgmlType::Q4_0 => {
+                    let n_elements = elements as usize;
+                    dequantize_q4_0(&data, n_elements)
+                }
+                gguf::GgmlType::Q8_0 => {
+                    let n_elements = elements as usize;
+                    dequantize_q8_0(&data, n_elements)
+                }
+                _ => {
+                    return Err(LlamaError::LoadError(format!(
+                        "unsupported tensor dtype for {}: {:?}",
+                        tensor.name, tensor.dtype
+                    )));
+                }
+            };
+
+            weights.insert(tensor.name.clone(), f32_data);
         }
 
         Ok(Self {
@@ -428,6 +471,7 @@ impl Model {
             arch,
             tokenizer,
             parameter_count: param_count,
+            weights,
         })
     }
 
@@ -467,6 +511,14 @@ impl Model {
     #[must_use]
     pub fn get_tensor(&self, name: &str) -> Option<&TensorInfo> {
         self.reader.find_tensor(name)
+    }
+
+    /// Get a tensor's weight data as f32 slice from cache.
+    ///
+    /// Returns `None` if not found.
+    #[must_use]
+    pub fn get_weight(&self, name: &str) -> Option<&[f32]> {
+        self.weights.get(name).map(|v| v.as_slice())
     }
 
     /// Returns the number of tensors.
@@ -643,20 +695,24 @@ impl InferenceContext {
             for layer in 0..arch.n_layer as usize {
                 let prefix = format!("blk.{}.", layer);
 
-                // RMSNorm before attention
-                let norm_weight = self.get_tensor_f32(&format!("{prefix}attn_norm.weight"))?;
-                let attn_input = rms_norm(&hidden, &norm_weight, arch.norm_eps);
+                // Get all weights first to avoid borrow conflicts
+                let norm_weight = self.model.get_weight(&format!("{prefix}attn_norm.weight")).ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {prefix}attn_norm.weight")))?;
+                let q_weight = self.model.get_weight(&format!("{prefix}attn_q.weight")).ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {prefix}attn_q.weight")))?;
+                let k_weight = self.model.get_weight(&format!("{prefix}attn_k.weight")).ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {prefix}attn_k.weight")))?;
+                let v_weight = self.model.get_weight(&format!("{prefix}attn_v.weight")).ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {prefix}attn_v.weight")))?;
+                let o_weight = self.model.get_weight(&format!("{prefix}attn_output.weight")).ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {prefix}attn_output.weight")))?;
+                let ffn_norm_weight = self.model.get_weight(&format!("{prefix}ffn_norm.weight")).ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {prefix}ffn_norm.weight")))?;
+                let gate_weight = self.model.get_weight(&format!("{prefix}ffn_gate.weight")).ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {prefix}ffn_gate.weight")))?;
+                let up_weight = self.model.get_weight(&format!("{prefix}ffn_up.weight")).ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {prefix}ffn_up.weight")))?;
+                let down_weight = self.model.get_weight(&format!("{prefix}ffn_down.weight")).ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {prefix}ffn_down.weight")))?;
 
-                // Self-attention
-                let q_weight = self.get_tensor_f32(&format!("{prefix}attn_q.weight"))?;
-                let k_weight = self.get_tensor_f32(&format!("{prefix}attn_k.weight"))?;
-                let v_weight = self.get_tensor_f32(&format!("{prefix}attn_v.weight"))?;
-                let o_weight = self.get_tensor_f32(&format!("{prefix}attn_output.weight"))?;
+                // RMSNorm before attention
+                let attn_input = rms_norm(&hidden, norm_weight, arch.norm_eps);
 
                 // Project Q, K, V
-                let q = mat_vec_batch(&q_weight, &attn_input, seq_len, n_embd, n_embd);
-                let k = mat_vec_batch(&k_weight, &attn_input, seq_len, n_embd, n_embd);
-                let v = mat_vec_batch(&v_weight, &attn_input, seq_len, n_embd, n_embd);
+                let q = mat_vec_batch(q_weight, &attn_input, seq_len, n_embd, n_embd);
+                let k = mat_vec_batch(k_weight, &attn_input, seq_len, n_embd, n_embd);
+                let v = mat_vec_batch(v_weight, &attn_input, seq_len, n_embd, n_embd);
 
                 // Apply RoPE
                 let mut q_rope = vec![0.0f32; q.len()];
@@ -706,25 +762,19 @@ impl InferenceContext {
                 );
 
                 // Output projection
-                let attn_proj = mat_vec_batch(&o_weight, &attn_output, seq_len, n_embd, n_embd);
+                let attn_proj = mat_vec_batch(o_weight, &attn_output, seq_len, n_embd, n_embd);
 
                 // Residual connection
                 for i in 0..hidden.len() {
                     hidden[i] += attn_proj[i];
                 }
 
-                // RMSNorm before FFN
-                let ffn_norm_weight = self.get_tensor_f32(&format!("{prefix}ffn_norm.weight"))?;
-                let ffn_input = rms_norm(&hidden, &ffn_norm_weight, arch.norm_eps);
-
                 // FFN: SwiGLU
-                let gate_weight = self.get_tensor_f32(&format!("{prefix}ffn_gate.weight"))?;
-                let up_weight = self.get_tensor_f32(&format!("{prefix}ffn_up.weight"))?;
-                let down_weight = self.get_tensor_f32(&format!("{prefix}ffn_down.weight"))?;
+                let ffn_input = rms_norm(&hidden, ffn_norm_weight, arch.norm_eps);
                 let n_ff = arch.n_ff as usize;
 
-                let gate = mat_vec_batch(&gate_weight, &ffn_input, seq_len, n_embd, n_ff);
-                let up = mat_vec_batch(&up_weight, &ffn_input, seq_len, n_embd, n_ff);
+                let gate = mat_vec_batch(gate_weight, &ffn_input, seq_len, n_embd, n_ff);
+                let up = mat_vec_batch(up_weight, &ffn_input, seq_len, n_embd, n_ff);
 
                 // SwiGLU: silu(gate) * up
                 let mut ffn_out = vec![0.0f32; seq_len * n_ff];
@@ -734,7 +784,7 @@ impl InferenceContext {
                 }
 
                 // Down projection
-                let ffn_proj = mat_vec_batch(&down_weight, &ffn_out, seq_len, n_ff, n_embd);
+                let ffn_proj = mat_vec_batch(down_weight, &ffn_out, seq_len, n_ff, n_embd);
 
                 // Residual connection
                 for i in 0..hidden.len() {
@@ -743,13 +793,13 @@ impl InferenceContext {
             }
 
             // 3. Final RMSNorm
-            let output_norm = self.get_tensor_f32("output_norm.weight")?;
-            let normalized = rms_norm(&hidden, &output_norm, arch.norm_eps);
+            let output_norm = self.model.get_weight("output_norm.weight").ok_or_else(|| LlamaError::LoadError("missing tensor: output_norm.weight".into()))?;
+            let normalized = rms_norm(&hidden, output_norm, arch.norm_eps);
 
             // 4. Output projection (lm_head)
-            let lm_head = self.get_tensor_f32("output.weight")?;
+            let lm_head = self.model.get_weight("output.weight").ok_or_else(|| LlamaError::LoadError("missing tensor: output.weight".into()))?;
             let logits = mat_vec_batch(
-                &lm_head,
+                lm_head,
                 &normalized,
                 seq_len,
                 n_embd,
@@ -775,54 +825,10 @@ impl InferenceContext {
         Ok(generated)
     }
 
-    /// Get tensor data as f32 slice.
-    fn get_tensor_f32(&self, name: &str) -> LlamaResult<Vec<f32>> {
-        let tensor = self
-            .model
-            .get_tensor(name)
-            .ok_or_else(|| LlamaError::LoadError(format!("missing tensor: {name}")))?;
-
-        // Read tensor data from GGUF file
-        let data = self
-            .model
-            .reader()
-            .read_tensor_data(tensor)
-            .map_err(|e| LlamaError::LoadError(format!("failed to read tensor {name}: {e}")))?;
-
-        // Convert bytes to f32 based on tensor dtype
-        let f32_data: Vec<f32> = match tensor.dtype {
-            gguf::GgmlType::F32 => {
-                let slice = unsafe {
-                    std::slice::from_raw_parts(data.as_ptr().cast::<f32>(), data.len() / 4)
-                };
-                slice.to_vec()
-            }
-            gguf::GgmlType::F16 => {
-                // Convert F16 to F32
-                let mut result = Vec::with_capacity(data.len() / 2);
-                for i in (0..data.len()).step_by(2) {
-                    let bits = u16::from_le_bytes([data[i], data[i + 1]]);
-                    result.push(f16_to_f32(bits));
-                }
-                result
-            }
-            gguf::GgmlType::Q4_0 => dequantize_q4_0(&data, tensor.shape.first().copied().unwrap_or(0) as usize),
-            gguf::GgmlType::Q8_0 => dequantize_q8_0(&data, tensor.shape.first().copied().unwrap_or(0) as usize),
-            _ => {
-                return Err(LlamaError::LoadError(format!(
-                    "unsupported tensor dtype for {name}: {:?}",
-                    tensor.dtype
-                )));
-            }
-        };
-
-        Ok(f32_data)
-    }
-
     /// Get token embedding for a token ID.
     fn embed_tokens(&self, tokens: &[u32]) -> LlamaResult<Vec<f32>> {
         let n_embd = self.model.architecture().n_embd as usize;
-        let token_embd = self.get_tensor_f32("token_embd.weight")?;
+        let token_embd = self.model.get_weight("token_embd.weight").ok_or_else(|| LlamaError::LoadError("missing tensor: token_embd.weight".into()))?;
 
         let mut embeddings = vec![0.0f32; tokens.len() * n_embd];
         for (i, &token_id) in tokens.iter().enumerate() {
