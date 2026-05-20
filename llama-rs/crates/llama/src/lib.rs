@@ -450,6 +450,14 @@ impl Model {
                     let n_elements = elements as usize;
                     dequantize_q4_0(&data, n_elements)
                 }
+                gguf::GgmlType::Q5_0 => {
+                    let n_elements = elements as usize;
+                    dequantize_q5_0(&data, n_elements)
+                }
+                gguf::GgmlType::Q5_1 => {
+                    let n_elements = elements as usize;
+                    dequantize_q5_1(&data, n_elements)
+                }
                 gguf::GgmlType::Q8_0 => {
                     let n_elements = elements as usize;
                     dequantize_q8_0(&data, n_elements)
@@ -1222,6 +1230,97 @@ fn dequantize_q8_0(data: &[u8], n_elements: usize) -> Vec<f32> {
     result
 }
 
+/// Q5_0 block size (number of elements per block).
+const QK5_0: usize = 32;
+/// Q5_0 block size in bytes: 2 (f16 scale) + 4 (high bits) + 16 (nibbles) = 22.
+const Q5_0_BLOCK_SIZE: usize = 22;
+
+/// Dequantize Q5_0 tensor data to f32.
+///
+/// Q5_0 format: 5-bit quantization with block size 32.
+/// Each block: 2 bytes (f16 scale) + 4 bytes (high bits) + 16 bytes (4-bit values).
+/// Dequantization: val[i] = scale * ((qs[i] | high_bit[i]) - 16)
+fn dequantize_q5_0(data: &[u8], n_elements: usize) -> Vec<f32> {
+    let n_blocks = n_elements / QK5_0;
+    let mut result = Vec::with_capacity(n_elements);
+
+    for block_idx in 0..n_blocks {
+        let block_start = block_idx * Q5_0_BLOCK_SIZE;
+        let scale_bytes = &data[block_start..block_start + 2];
+        let scale = f16_to_f32(u16::from_le_bytes([scale_bytes[0], scale_bytes[1]]));
+
+        // High bits: 4 bytes = 32 bits, one per element
+        let qh = u32::from_le_bytes([
+            data[block_start + 2],
+            data[block_start + 3],
+            data[block_start + 4],
+            data[block_start + 5],
+        ]);
+
+        let qs = &data[block_start + 6..block_start + Q5_0_BLOCK_SIZE];
+
+        for j in 0..16 {
+            // Extract 5th bit for each element
+            let xh_0 = ((qh >> (j as u32)) << 4) & 0x10;
+            let xh_1 = ((qh >> (j as u32 + 12)) & 0x10) as u8;
+
+            let x0 = ((qs[j] & 0x0F) | xh_0 as u8) as i32 - 16;
+            let x1 = ((qs[j] >> 4) | xh_1) as i32 - 16;
+
+            result.push(scale * x0 as f32);
+            result.push(scale * x1 as f32);
+        }
+    }
+
+    result
+}
+
+/// Q5_1 block size (number of elements per block).
+const QK5_1: usize = 32;
+/// Q5_1 block size in bytes: 2 (f16 scale) + 2 (f16 min) + 4 (high bits) + 16 (nibbles) = 24.
+const Q5_1_BLOCK_SIZE: usize = 24;
+
+/// Dequantize Q5_1 tensor data to f32.
+///
+/// Q5_1 format: 5-bit quantization with block size 32.
+/// Each block: 2 bytes (f16 scale) + 2 bytes (f16 min) + 4 bytes (high bits) + 16 bytes (4-bit values).
+/// Dequantization: val[i] = scale * (qs[i] | high_bit[i]) + min
+fn dequantize_q5_1(data: &[u8], n_elements: usize) -> Vec<f32> {
+    let n_blocks = n_elements / QK5_1;
+    let mut result = Vec::with_capacity(n_elements);
+
+    for block_idx in 0..n_blocks {
+        let block_start = block_idx * Q5_1_BLOCK_SIZE;
+        let scale_bytes = &data[block_start..block_start + 2];
+        let scale = f16_to_f32(u16::from_le_bytes([scale_bytes[0], scale_bytes[1]]));
+        let min_bytes = &data[block_start + 2..block_start + 4];
+        let min = f16_to_f32(u16::from_le_bytes([min_bytes[0], min_bytes[1]]));
+
+        // High bits: 4 bytes = 32 bits, one per element
+        let qh = u32::from_le_bytes([
+            data[block_start + 4],
+            data[block_start + 5],
+            data[block_start + 6],
+            data[block_start + 7],
+        ]);
+
+        let qs = &data[block_start + 8..block_start + Q5_1_BLOCK_SIZE];
+
+        for j in 0..16 {
+            let xh_0 = ((qh >> (j as u32)) << 4) & 0x10;
+            let xh_1 = ((qh >> (j as u32 + 12)) & 0x10) as u8;
+
+            let x0 = ((qs[j] & 0x0F) | xh_0 as u8) as f32;
+            let x1 = ((qs[j] >> 4) | xh_1) as f32;
+
+            result.push(scale * x0 + min);
+            result.push(scale * x1 + min);
+        }
+    }
+
+    result
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1479,5 +1578,61 @@ mod tests {
         assert!(result[0].abs() < 0.01);
         // Last value: 0.1 * 31 = 3.1
         assert!((result[31] - 3.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn dequantize_q5_0_should_recover_values() {
+        // Build a Q5_0 block with scale=1.0, all high bits = 0
+        // q[i] stored as (val/scale + 16), so for scale=1.0:
+        // val=-16 -> q=0, val=-15 -> q=1, ..., val=15 -> q=31
+        // Block: scale (f16 1.0 = 0x3C00) + 4 bytes (qh=0) + 16 bytes (4-bit values)
+        let mut block = vec![0u8; Q5_0_BLOCK_SIZE];
+        // Scale = 1.0 in f16
+        block[0] = 0x00;
+        block[1] = 0x3C;
+        // qh = 0 (all high bits are 0)
+
+        // Fill with values 0..15 repeated (will dequantize to -16..-1)
+        for i in 0..16 {
+            block[6 + i] = (i as u8) | ((i as u8) << 4);
+        }
+
+        let result = dequantize_q5_0(&block, QK5_0);
+        assert_eq!(result.len(), QK5_0);
+
+        // First two values: q=0 -> -16, q=0 -> -16
+        assert!((result[0] - (-16.0)).abs() < 0.001);
+        assert!((result[1] - (-16.0)).abs() < 0.001);
+        // Last two values: q=15 -> -1, q=15 -> -1
+        assert!((result[30] - (-1.0)).abs() < 0.001);
+        assert!((result[31] - (-1.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn dequantize_q5_1_should_recover_values() {
+        // Build a Q5_1 block with scale=1.0, min=0.0, all high bits = 0
+        // q[i] stored as raw 5-bit value, val = scale * q + min
+        // Block: scale (f16 1.0) + min (f16 0.0) + 4 bytes (qh=0) + 16 bytes (4-bit values)
+        let mut block = vec![0u8; Q5_1_BLOCK_SIZE];
+        // Scale = 1.0 in f16
+        block[0] = 0x00;
+        block[1] = 0x3C;
+        // Min = 0.0 in f16 (already zero)
+        // qh = 0 (all high bits are 0)
+
+        // Fill with values 0..15 repeated (will dequantize to 0..15)
+        for i in 0..16 {
+            block[8 + i] = (i as u8) | ((i as u8) << 4);
+        }
+
+        let result = dequantize_q5_1(&block, QK5_1);
+        assert_eq!(result.len(), QK5_1);
+
+        // First two values: q=0 -> 0, q=0 -> 0
+        assert!(result[0].abs() < 0.001);
+        assert!(result[1].abs() < 0.001);
+        // Last two values: q=15 -> 15, q=15 -> 15
+        assert!((result[30] - 15.0).abs() < 0.001);
+        assert!((result[31] - 15.0).abs() < 0.001);
     }
 }
