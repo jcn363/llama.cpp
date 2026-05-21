@@ -444,25 +444,62 @@ impl TensorInfo {
                 if raw.len() % 4 != 0 {
                     return Err(GgufError::DecodeError("F32 tensor size not multiple of 4".into()));
                 }
-                let mut out = Vec::with_capacity(raw.len() / 4);
-                for chunk in raw.chunks_exact(4) {
-                    let v = f32::from_le_bytes(chunk.try_into().unwrap());
-                    out.push(v);
+                let num_elements = raw.len() / 4;
+                
+                // Parallel for large tensors (> 64K elements)
+                if num_elements > 65536 {
+                    use rayon::prelude::*;
+                    let mut out = vec![0.0f32; num_elements];
+                    out.par_chunks_mut(1024)
+                        .enumerate()
+                        .for_each(|(chunk_idx, chunk)| {
+                            let start = chunk_idx * 1024 * 4;
+                            for (i, out_val) in chunk.iter_mut().enumerate() {
+                                let byte_idx = start + i * 4;
+                                *out_val = f32::from_le_bytes(raw[byte_idx..byte_idx + 4].try_into().unwrap());
+                            }
+                        });
+                    Ok(out)
+                } else {
+                    let mut out = Vec::with_capacity(num_elements);
+                    for chunk in raw.chunks_exact(4) {
+                        let v = f32::from_le_bytes(chunk.try_into().unwrap());
+                        out.push(v);
+                    }
+                    Ok(out)
                 }
-                Ok(out)
             }
             GgmlType::F16 => {
                 // each f16 is 2 bytes
                 if raw.len() % 2 != 0 {
                     return Err(GgufError::DecodeError("F16 tensor size not multiple of 2".into()));
                 }
-                let mut out = Vec::with_capacity(raw.len() / 2);
-                for chunk in raw.chunks_exact(2) {
-                    let bits = u16::from_le_bytes(chunk.try_into().unwrap());
-                    let f: f32 = half::f16::from_bits(bits).to_f32();
-                    out.push(f);
+                let num_elements = raw.len() / 2;
+                
+                // Parallel for large tensors (> 64K elements)
+                if num_elements > 65536 {
+                    use rayon::prelude::*;
+                    let mut out = vec![0.0f32; num_elements];
+                    out.par_chunks_mut(1024)
+                        .enumerate()
+                        .for_each(|(chunk_idx, chunk)| {
+                            let start = chunk_idx * 1024 * 2;
+                            for (i, out_val) in chunk.iter_mut().enumerate() {
+                                let byte_idx = start + i * 2;
+                                let bits = u16::from_le_bytes(raw[byte_idx..byte_idx + 2].try_into().unwrap());
+                                *out_val = half::f16::from_bits(bits).to_f32();
+                            }
+                        });
+                    Ok(out)
+                } else {
+                    let mut out = Vec::with_capacity(num_elements);
+                    for chunk in raw.chunks_exact(2) {
+                        let bits = u16::from_le_bytes(chunk.try_into().unwrap());
+                        let f: f32 = half::f16::from_bits(bits).to_f32();
+                        out.push(f);
+                    }
+                    Ok(out)
                 }
-                Ok(out)
             }
             GgmlType::Q4_0 => dequantize_q4_0(raw),
             GgmlType::Q4_1 => dequantize_q4_1(raw),
@@ -494,21 +531,56 @@ fn dequantize_q4_0(raw: &[u8]) -> Result<Vec<f32>, GgufError> {
     }
     
     let num_blocks = raw.len() / BLOCK_SIZE;
-    let mut out = Vec::with_capacity(num_blocks * QK4_0);
     
-    for block in raw.chunks_exact(BLOCK_SIZE) {
-        let d = half::f16::from_bits(u16::from_le_bytes(block[0..2].try_into().unwrap())).to_f32();
-        let qs = &block[2..18];
+    // Parallel for large tensors (> 64K elements = 2048 blocks)
+    if num_blocks > 2048 {
+        use rayon::prelude::*;
+        let mut out = vec![0.0f32; num_blocks * QK4_0];
         
-        for i in 0..16 {
-            let v0 = (qs[i] & 0x0F) as i8 - 8;
-            let v1 = (qs[i] >> 4) as i8 - 8;
-            out.push(v0 as f32 * d);
-            out.push(v1 as f32 * d);
+        out.par_chunks_mut(1024)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                let start_block = (chunk_idx * 1024) / QK4_0;
+                let end_block = ((chunk_idx + 1) * 1024) / QK4_0;
+                
+                for block_idx in start_block..end_block.min(num_blocks) {
+                    let block_start = block_idx * BLOCK_SIZE;
+                    let block = &raw[block_start..block_start + BLOCK_SIZE];
+                    let d = half::f16::from_bits(u16::from_le_bytes(block[0..2].try_into().unwrap())).to_f32();
+                    let qs = &block[2..18];
+                    
+                    let out_start = block_idx * QK4_0 - start_block * QK4_0;
+                    for i in 0..16 {
+                        let v0 = (qs[i] & 0x0F) as i8 - 8;
+                        let v1 = (qs[i] >> 4) as i8 - 8;
+                        if out_start + i * 2 < chunk.len() {
+                            chunk[out_start + i * 2] = v0 as f32 * d;
+                            if out_start + i * 2 + 1 < chunk.len() {
+                                chunk[out_start + i * 2 + 1] = v1 as f32 * d;
+                            }
+                        }
+                    }
+                }
+            });
+        
+        Ok(out)
+    } else {
+        let mut out = Vec::with_capacity(num_blocks * QK4_0);
+        
+        for block in raw.chunks_exact(BLOCK_SIZE) {
+            let d = half::f16::from_bits(u16::from_le_bytes(block[0..2].try_into().unwrap())).to_f32();
+            let qs = &block[2..18];
+            
+            for i in 0..16 {
+                let v0 = (qs[i] & 0x0F) as i8 - 8;
+                let v1 = (qs[i] >> 4) as i8 - 8;
+                out.push(v0 as f32 * d);
+                out.push(v1 as f32 * d);
+            }
         }
+        
+        Ok(out)
     }
-    
-    Ok(out)
 }
 
 /// Q4_1: 4-bit quantization, variant 1.

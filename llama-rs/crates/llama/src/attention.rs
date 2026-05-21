@@ -198,6 +198,7 @@ pub fn multi_head_attention_with_cache(
 ///
 /// This is a simplified version that processes all tokens at once.
 /// Used for prompt encoding (prefill phase).
+#[allow(dead_code)]
 pub fn multi_head_attention_prefill(
     n_head: usize,
     n_head_kv: usize,

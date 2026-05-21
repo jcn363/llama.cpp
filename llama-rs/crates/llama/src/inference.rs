@@ -45,6 +45,7 @@ pub fn silu(x: &[f32]) -> Vec<f32> {
 }
 
 /// Compute softmax over a vector.
+#[allow(dead_code)]
 pub fn softmax(x: &[f32]) -> Vec<f32> {
     let max = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exp_sum: f32 = x.iter().map(|v| (v - max).exp()).sum();
@@ -66,34 +67,117 @@ pub fn sample_argmax(logits: &[f32]) -> usize {
 /// `mat` is row-major of shape (rows, cols).
 /// `vec` is of length cols.
 /// Returns a vector of length rows.
+/// 
+/// Optimized with:
+/// - Parallel execution across rows using Rayon
+/// - SIMD-friendly 4-wide unrolling in dot product
+/// - Cache-friendly sequential row access
 pub fn mat_vec(mat: &[f32], rows: usize, cols: usize, vec: &[f32]) -> Vec<f32> {
+    use rayon::prelude::*;
     assert_eq!(mat.len(), rows * cols);
     assert_eq!(vec.len(), cols);
     
-    (0..rows)
-        .map(|r| {
-            let start = r * cols;
-            let row = &mat[start..start + cols];
-            row.iter().zip(vec.iter()).map(|(a, b)| a * b).sum()
-        })
-        .collect()
+    // For small matrices, sequential is faster due to overhead
+    if rows < 64 {
+        (0..rows)
+            .map(|r| {
+                let start = r * cols;
+                let row = &mat[start..start + cols];
+                dot_product(row, vec)
+            })
+            .collect()
+    } else {
+        // Parallel for larger matrices
+        (0..rows)
+            .into_par_iter()
+            .map(|r| {
+                let start = r * cols;
+                let row = &mat[start..start + cols];
+                dot_product(row, vec)
+            })
+            .collect()
+    }
+}
+
+/// Optimized dot product with 4-wide SIMD-friendly unrolling.
+#[inline(always)]
+fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    let mut sum = 0.0f32;
+    
+    // 8-wide unrolling for better SIMD vectorization
+    let chunks = len / 8;
+    for i in 0..chunks {
+        let base = i * 8;
+        sum += a[base] * b[base]
+            + a[base + 1] * b[base + 1]
+            + a[base + 2] * b[base + 2]
+            + a[base + 3] * b[base + 3]
+            + a[base + 4] * b[base + 4]
+            + a[base + 5] * b[base + 5]
+            + a[base + 6] * b[base + 6]
+            + a[base + 7] * b[base + 7];
+    }
+    
+    // Handle remaining elements
+    for i in (chunks * 8)..len {
+        sum += a[i] * b[i];
+    }
+    
+    sum
 }
 
 /// Element-wise multiplication of two vectors.
+/// Parallelized for vectors > 1024 elements.
 pub fn mul_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
+    use rayon::prelude::*;
     assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).collect()
+    let len = a.len();
+    
+    if len < 1024 {
+        a.iter().zip(b.iter()).map(|(x, y)| x * y).collect()
+    } else {
+        let mut result = vec![0.0f32; len];
+        result.par_iter_mut()
+            .zip(a.par_iter().zip(b.par_iter()))
+            .for_each(|(out, (x, y))| *out = x * y);
+        result
+    }
 }
 
 /// Add two vectors element-wise.
+/// Parallelized for vectors > 1024 elements.
 pub fn add_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
+    use rayon::prelude::*;
     assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(x, y)| x + y).collect()
+    let len = a.len();
+    
+    if len < 1024 {
+        a.iter().zip(b.iter()).map(|(x, y)| x + y).collect()
+    } else {
+        let mut result = vec![0.0f32; len];
+        result.par_iter_mut()
+            .zip(a.par_iter().zip(b.par_iter()))
+            .for_each(|(out, (x, y))| *out = x + y);
+        result
+    }
 }
 
 /// Multiply a vector by a scalar.
+#[allow(dead_code)]
 pub fn scale_vec(v: &[f32], scale: f32) -> Vec<f32> {
-    v.iter().map(|x| x * scale).collect()
+    use rayon::prelude::*;
+    let len = v.len();
+    
+    if len < 1024 {
+        v.iter().map(|x| x * scale).collect()
+    } else {
+        let mut result = vec![0.0f32; len];
+        result.par_iter_mut()
+            .zip(v.par_iter())
+            .for_each(|(out, x)| *out = x * scale);
+        result
+    }
 }
 
 /// Apply temperature to logits and compute softmax.

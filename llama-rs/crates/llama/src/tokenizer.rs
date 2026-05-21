@@ -44,6 +44,7 @@ pub struct SimpleTokenizer {
     /// Token types for each token ID.
     token_types: Vec<TokenType>,
     /// Scores for each token ID (used for BPE).
+    #[allow(dead_code)]
     scores: Vec<f32>,
     /// BOS token ID.
     pub bos_token_id: usize,

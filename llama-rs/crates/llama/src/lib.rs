@@ -182,7 +182,7 @@ impl InferenceContext {
         }
         
         // Generate new tokens
-        for i in 0..n_predict {
+        for _i in 0..n_predict {
             // Get the last token
             let last_token = *toks.last().unwrap_or(&0);
             
