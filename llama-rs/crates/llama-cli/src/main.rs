@@ -7,7 +7,6 @@
 use clap::Parser;
 use llama::{InferenceContext, Model, ModelConfig};
 use std::sync::Arc;
-use tracing_subscriber::EnvFilter;
 
 /// Command-line arguments for llama-cli.
 #[derive(Parser, Debug)]
@@ -39,17 +38,22 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    eprintln!("Starting llama-cli...");
     let args = Args::parse();
+    eprintln!("Parsed args: model={}, prompt={}, n_predict={}", args.model, args.prompt, args.n_predict);
 
-    let filter = if args.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .init();
+    // let filter = if args.verbose { "debug" } else { "info" };
+    // tracing_subscriber::fmt()
+    //     .with_env_filter(EnvFilter::new(filter))
+    //     .init();
 
-    tracing::info!("Loading model from: {}", args.model);
+    eprintln!("Loading model from: {}", args.model);
+    let start = std::time::Instant::now();
 
     let model = Arc::new(Model::from_file(&args.model)?);
-    tracing::info!("{}", model.summary());
+    let load_time = start.elapsed();
+    eprintln!("Model loaded in {:.2}s", load_time.as_secs_f32());
+    eprintln!("{}", model.summary());
 
     let config = ModelConfig {
         n_threads: if args.threads == 0 {
@@ -60,10 +64,9 @@ fn main() -> anyhow::Result<()> {
         use_cuda: false,
         n_ctx: args.ctx_size,
         n_batch: args.ctx_size,
-        ..Default::default()
     };
 
-    let mut ctx = InferenceContext::new(model, config);
+    let ctx = InferenceContext::new(model, config);
 
     if args.prompt.is_empty() {
         println!("Interactive mode — type your prompt (Ctrl+D to end):");
@@ -77,7 +80,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("\nGenerating {} tokens...\n", args.n_predict);
 
-    let generated = ctx.generate(args.n_predict)?;
+    let generated = ctx.generate(&args.prompt, args.n_predict)?;
 
     // Print generated text
     for token_id in &generated {

@@ -18,6 +18,7 @@ tracing = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+anyhow = "1.0"
 
 [features]
 default = []
@@ -25,3 +26,9 @@ cuda = ["dep:ggml-cuda", "ggml-cuda/cuda"]
 
 [dev-dependencies]
 criterion = { workspace = true }
+tempfile = "3.8"
+fastrand = "2.0"
+
+[[bench]]
+name = "model_loading"
+harness = false

@@ -108,7 +108,6 @@ async fn main() -> anyhow::Result<()> {
         use_cuda: false,
         n_ctx: args.ctx_size,
         n_batch: args.ctx_size,
-        ..Default::default()
     };
 
     let state = ServerState {
@@ -154,10 +153,10 @@ async fn handle_completion(
     // Non-streaming: generate all tokens then return
     let model = Arc::clone(&state.model);
 
-    let mut ctx = InferenceContext::new(model, state.config.clone());
+    let ctx = InferenceContext::new(model, state.config.clone());
     ctx.encode(&request.prompt);
 
-    let generated = ctx.generate(request.max_tokens).map_err(|e| {
+    let generated = ctx.generate(&request.prompt, request.max_tokens).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("inference error: {e}"),
@@ -188,14 +187,14 @@ async fn handle_streaming(
 
     // Run inference in a blocking thread pool
     let stream = tokio::task::spawn_blocking(move || {
-        let mut ctx = InferenceContext::new(model, config);
+        let ctx = InferenceContext::new(model, config);
         ctx.encode(&prompt);
 
         let mut chunks = Vec::new();
 
         // Generate tokens one at a time
         for _ in 0..max_tokens {
-            let generated = match ctx.generate(1) {
+            let generated = match ctx.generate(&prompt, 1) {
                 Ok(tokens) => tokens,
                 Err(_) => break,
             };

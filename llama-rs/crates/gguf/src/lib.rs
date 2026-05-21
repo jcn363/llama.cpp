@@ -421,6 +421,54 @@ pub struct TensorInfo {
     pub offset: u64,
 }
 
+impl TensorInfo {
+    /// De‑quantize the raw tensor bytes into a `Vec<f32>`.
+    /// Supports F32 (no conversion) and F16 (converted to f32).
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the underlying byte slices cannot be
+    /// converted to the expected array sizes via `try_into`. The panic is
+    /// considered acceptable because the size checks are performed just
+    /// before the conversion, and a mismatch would indicate a corrupted
+    /// GGUF file.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GgufError::DecodeError` if the tensor size is not a multiple
+    /// of the element size, or if the dtype is unsupported.
+    pub fn dequantize(&self, raw: &[u8]) -> Result<Vec<f32>, GgufError> {
+        match self.dtype {
+            GgmlType::F32 => {
+                // raw length should be a multiple of 4
+                if raw.len() % 4 != 0 {
+                    return Err(GgufError::DecodeError("F32 tensor size not multiple of 4".into()));
+                }
+                let mut out = Vec::with_capacity(raw.len() / 4);
+                for chunk in raw.chunks_exact(4) {
+                    let v = f32::from_le_bytes(chunk.try_into().unwrap());
+                    out.push(v);
+                }
+                Ok(out)
+            }
+            GgmlType::F16 => {
+                // each f16 is 2 bytes
+                if raw.len() % 2 != 0 {
+                    return Err(GgufError::DecodeError("F16 tensor size not multiple of 2".into()));
+                }
+                let mut out = Vec::with_capacity(raw.len() / 2);
+                for chunk in raw.chunks_exact(2) {
+                    let bits = u16::from_le_bytes(chunk.try_into().unwrap());
+                    let f: f32 = half::f16::from_bits(bits).to_f32();
+                    out.push(f);
+                }
+                Ok(out)
+            }
+            _ => Err(GgufError::DecodeError(format!("unsupported dtype for dequantize: {:?}", self.dtype))),
+        }
+    }
+}
+
 // ─── GGUF Reader ─────────────────────────────────────────────────────────────
 
 /// A GGUF file reader that memory-maps the file for efficient access.
@@ -443,7 +491,54 @@ pub struct GgufReader {
     data_offset: usize,
 }
 
+// Added helper methods for convenience
 impl GgufReader {
+    /// Get a usize metadata value by key (expects u32 stored).
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GgufError::DecodeError` if the key is missing or has an
+    /// unexpected type.
+    pub fn get_usize(&self, key: &str) -> GgufResult<usize> {
+        match self.get_kv(key) {
+            Some(GgufValue::U32(v)) => Ok(*v as usize),
+            Some(GgufValue::U64(v)) => Ok(usize::try_from(*v).map_err(|e| GgufError::DecodeError(e.to_string()))?),
+            Some(other) => Err(GgufError::DecodeError(format!("metadata key '{key}' has unexpected type: {other:?}"))),
+            None => Err(GgufError::DecodeError(format!("metadata key '{key}' not found"))),
+        }
+    }
+
+    /// Get a usize metadata value, trying multiple keys in order.
+    /// Returns the first key that exists and has a valid type.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GgufError::DecodeError` if none of the keys are found or
+    /// all have unexpected types.
+    pub fn get_usize_any(&self, keys: &[&str]) -> GgufResult<usize> {
+        for &key in keys {
+            if let Some(val) = self.get_kv(key) {
+                return match val {
+                    GgufValue::U32(v) => Ok(*v as usize),
+                    GgufValue::U64(v) => Ok(usize::try_from(*v).map_err(|e| GgufError::DecodeError(e.to_string()))?),
+                    other => Err(GgufError::DecodeError(format!("metadata key '{key}' has unexpected type: {other:?}"))),
+                };
+            }
+        }
+        Err(GgufError::DecodeError(format!("none of the metadata keys found: {:?}", keys)))
+    }
+
+    /// Load raw tensor bytes for a given `TensorInfo`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GgufError`] if the tensor data cannot be read.
+    pub fn load_tensor_raw(&self, info: &TensorInfo) -> GgufResult<&[u8]> {
+        self.read_tensor_data(info)
+    }
+
+    // Existing methods follow...
+
     /// Open a GGUF file from the given path.
     ///
     /// # Errors
