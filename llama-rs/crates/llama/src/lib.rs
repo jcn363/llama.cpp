@@ -5,11 +5,52 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 mod kv_cache;
 mod attention;
 mod inference;
 pub mod tokenizer;
+
+/// Profiling results for a single forward pass.
+#[derive(Debug, Clone, Default)]
+pub struct ProfileResult {
+    /// Time to load embedding (ms).
+    pub embed_ms: f64,
+    /// Per-layer timing: (layer_idx, attention_ms, ffn_ms).
+    pub layer_times: Vec<(usize, f64, f64)>,
+    /// Time for final norm + output projection (ms).
+    pub output_ms: f64,
+    /// Total forward pass time (ms).
+    pub total_ms: f64,
+}
+
+impl ProfileResult {
+    /// Get the total time spent in attention across all layers.
+    pub fn total_attention_ms(&self) -> f64 {
+        self.layer_times.iter().map(|(_, a, _)| a).sum()
+    }
+
+    /// Get the total time spent in FFN across all layers.
+    pub fn total_ffn_ms(&self) -> f64 {
+        self.layer_times.iter().map(|(_, _, f)| f).sum()
+    }
+
+    /// Format as a human-readable report.
+    pub fn report(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&format!("Forward Pass Profile (total: {:.2}ms)\n", self.total_ms));
+        s.push_str(&format!("  Embedding:     {:.2}ms ({:.1}%)\n", self.embed_ms, self.embed_ms / self.total_ms * 100.0));
+        s.push_str(&format!("  Attention:     {:.2}ms ({:.1}%)\n", self.total_attention_ms(), self.total_attention_ms() / self.total_ms * 100.0));
+        s.push_str(&format!("  FFN:           {:.2}ms ({:.1}%)\n", self.total_ffn_ms(), self.total_ffn_ms() / self.total_ms * 100.0));
+        s.push_str(&format!("  Output:        {:.2}ms ({:.1}%)\n", self.output_ms, self.output_ms / self.total_ms * 100.0));
+        s.push_str("  Per-layer breakdown:\n");
+        for (idx, attn, ffn) in &self.layer_times {
+            s.push_str(&format!("    Layer {:>2}: attn={:.2}ms, ffn={:.2}ms\n", idx, attn, ffn));
+        }
+        s
+    }
+}
 
 use crate::kv_cache::KvCacheManager;
 use crate::attention::multi_head_attention_with_cache;
@@ -338,6 +379,201 @@ impl InferenceContext {
             let logits = mat_vec(&token_embd, self.model.vocab_size, n_embd, &x);
             Ok(logits)
         }
+    }
+
+    /// Run a single forward pass with per-layer profiling.
+    /// Returns both logits and timing information.
+    fn forward_pass_with_profile(&self, token_id: usize) -> anyhow::Result<(Vec<f32>, ProfileResult)> {
+        let total_start = Instant::now();
+        let mut profile = ProfileResult::default();
+
+        // Get embedding for this token
+        let embed_start = Instant::now();
+        let token_embd = self.model.get_tensor("token_embd.weight")?;
+        let mut x = embed_token(token_id, &token_embd, self.model.n_embd)?;
+        profile.embed_ms = embed_start.elapsed().as_secs_f64() * 1000.0;
+
+        let n_layers = self.model.n_layers();
+        if n_layers == 0 {
+            profile.total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+            return Ok((vec![0.0; self.model.vocab_size], profile));
+        }
+
+        let n_head = self.model.n_head;
+        let n_head_kv = self.model.n_head_kv;
+        let head_dim = self.model.d_head;
+        let n_embd = self.model.n_embd;
+        let rope_theta = self.model.rope_theta;
+
+        // Apply each transformer block
+        for layer_idx in 0..n_layers {
+            let layer_start = Instant::now();
+            let residual = x.clone();
+
+            // Attention norm
+            let attn_norm_name = format!("blk.{}.attn_norm.weight", layer_idx);
+            if let Ok(attn_norm_weight) = self.model.get_tensor(&attn_norm_name) {
+                x = rms_norm(&x, &attn_norm_weight, 1e-5);
+            }
+
+            // Get Q, K, V projection weights
+            let q_proj_name = format!("blk.{}.attn_q.weight", layer_idx);
+            let k_proj_name = format!("blk.{}.attn_k.weight", layer_idx);
+            let v_proj_name = format!("blk.{}.attn_v.weight", layer_idx);
+
+            let mut attn_ms = 0.0;
+            if let (Ok(q_weight), Ok(k_weight), Ok(v_weight)) = (
+                self.model.get_tensor(&q_proj_name),
+                self.model.get_tensor(&k_proj_name),
+                self.model.get_tensor(&v_proj_name),
+            ) {
+                let attn_start = Instant::now();
+                let mut q = mat_vec(&q_weight, n_head * head_dim, n_embd, &x);
+                let mut k = mat_vec(&k_weight, n_head_kv * head_dim, n_embd, &x);
+                let v = mat_vec(&v_weight, n_head_kv * head_dim, n_embd, &x);
+
+                let kv_cache = self.model.kv_cache.write().unwrap();
+                let position_offset = kv_cache.get_layer_ref(layer_idx).cur_len;
+                drop(kv_cache);
+
+                let mut kv_cache = self.model.kv_cache.write().unwrap();
+                let attn_output = multi_head_attention_with_cache(
+                    n_head,
+                    n_head_kv,
+                    head_dim,
+                    1,
+                    position_offset,
+                    &mut q,
+                    &mut k,
+                    &v,
+                    kv_cache.get_layer(layer_idx),
+                    rope_theta,
+                );
+                drop(kv_cache);
+
+                let attn_out_name = format!("blk.{}.attn_output.weight", layer_idx);
+                if let Ok(attn_out_weight) = self.model.get_tensor(&attn_out_name) {
+                    let attn_proj = mat_vec(&attn_out_weight, n_embd, n_head * head_dim, &attn_output);
+                    x = add_vec(&residual, &attn_proj);
+                } else {
+                    x = add_vec(&residual, &attn_output);
+                }
+                attn_ms = attn_start.elapsed().as_secs_f64() * 1000.0;
+            } else {
+                x = residual;
+            }
+
+            // FFN
+            let ffn_start = Instant::now();
+            let ffn_residual = x.clone();
+
+            let ffn_norm_name = format!("blk.{}.ffn_norm.weight", layer_idx);
+            if let Ok(ffn_norm_weight) = self.model.get_tensor(&ffn_norm_name) {
+                x = rms_norm(&x, &ffn_norm_weight, 1e-5);
+            }
+
+            let gate_name = format!("blk.{}.ffn_gate.weight", layer_idx);
+            let up_name = format!("blk.{}.ffn_up.weight", layer_idx);
+            let down_name = format!("blk.{}.ffn_down.weight", layer_idx);
+
+            if let (Ok(gate), Ok(up), Ok(down)) = (
+                self.model.get_tensor(&gate_name),
+                self.model.get_tensor(&up_name),
+                self.model.get_tensor(&down_name),
+            ) {
+                let gate_proj = mat_vec(&gate, self.model.n_ff, n_embd, &x);
+                let up_proj = mat_vec(&up, self.model.n_ff, n_embd, &x);
+                let silu_gate = silu(&gate_proj);
+                let ffn_hidden = mul_vec(&silu_gate, &up_proj);
+                let ffn_output = mat_vec(&down, n_embd, self.model.n_ff, &ffn_hidden);
+                x = add_vec(&ffn_residual, &ffn_output);
+            } else {
+                x = ffn_residual;
+            }
+            let ffn_ms = ffn_start.elapsed().as_secs_f64() * 1000.0;
+
+            profile.layer_times.push((layer_idx, attn_ms, ffn_ms));
+            let _layer_total = layer_start.elapsed();
+        }
+
+        // Final norm + output
+        let output_start = Instant::now();
+        if let Ok(final_norm) = self.model.get_tensor("output_norm.weight") {
+            x = rms_norm(&x, &final_norm, 1e-5);
+        }
+
+        let logits = if let Ok(output_weight) = self.model.get_tensor("output.weight") {
+            mat_vec(&output_weight, self.model.vocab_size, n_embd, &x)
+        } else {
+            mat_vec(&token_embd, self.model.vocab_size, n_embd, &x)
+        };
+        profile.output_ms = output_start.elapsed().as_secs_f64() * 1000.0;
+        profile.total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+        Ok((logits, profile))
+    }
+
+    /// Generate token IDs with profiling information.
+    /// Returns (token_ids, average_profile_result).
+    pub fn generate_with_profile(&self, prompt: &str, n_predict: usize) -> anyhow::Result<(Vec<usize>, ProfileResult)> {
+        let mut toks = self.encode(prompt);
+
+        if toks.len() > self.config.n_ctx {
+            toks.truncate(self.config.n_ctx);
+        }
+
+        let mut profiles = Vec::new();
+
+        for _i in 0..n_predict {
+            let last_token = *toks.last().unwrap_or(&0);
+
+            match self.forward_pass_with_profile(last_token) {
+                Ok((logits, profile)) => {
+                    let next_token = sample_logits(&logits, &self.sampling);
+                    toks.push(next_token);
+                    profiles.push(profile);
+
+                    if next_token == self.model.eos_token_id {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    toks.push(0);
+                }
+            }
+        }
+
+        // Compute average profile
+        let avg_profile = if profiles.is_empty() {
+            ProfileResult::default()
+        } else {
+            let n = profiles.len() as f64;
+            let mut avg = ProfileResult::default();
+            avg.embed_ms = profiles.iter().map(|p| p.embed_ms).sum::<f64>() / n;
+            avg.output_ms = profiles.iter().map(|p| p.output_ms).sum::<f64>() / n;
+            avg.total_ms = profiles.iter().map(|p| p.total_ms).sum::<f64>() / n;
+
+            // Average layer times
+            let max_layers = profiles.iter().map(|p| p.layer_times.len()).max().unwrap_or(0);
+            for layer_idx in 0..max_layers {
+                let mut sum_attn = 0.0;
+                let mut sum_ffn = 0.0;
+                let mut count = 0.0;
+                for p in &profiles {
+                    if layer_idx < p.layer_times.len() {
+                        sum_attn += p.layer_times[layer_idx].1;
+                        sum_ffn += p.layer_times[layer_idx].2;
+                        count += 1.0;
+                    }
+                }
+                if count > 0.0 {
+                    avg.layer_times.push((layer_idx, sum_attn / count, sum_ffn / count));
+                }
+            }
+            avg
+        };
+
+        Ok((toks, avg_profile))
     }
 
     /// Decode a single token id to string.
