@@ -95,6 +95,10 @@ pub struct Model {
     pub rope_theta: f32,
     /// Tokenizer vocabulary loaded from GGUF metadata.
     pub vocab_tokens: Vec<String>,
+    /// Tokenizer scores (for BPE ranking).
+    pub vocab_scores: Vec<f32>,
+    /// Tokenizer token types.
+    pub vocab_types: Vec<tokenizer::TokenType>,
     /// BOS token ID.
     pub bos_token_id: usize,
     /// EOS token ID.
@@ -143,6 +147,8 @@ impl InferenceContext {
         // Create tokenizer from model's vocabulary
         let tokenizer = SimpleTokenizer::from_gguf_vocab(
             model.vocab_tokens.clone(),
+            model.vocab_scores.clone(),
+            model.vocab_types.clone(),
             model.bos_token_id,
             model.eos_token_id,
             model.unk_token_id,
@@ -456,9 +462,16 @@ impl Model {
         //    Try both naming conventions and provide defaults.
         let vocab_tokens = reader.get_string_array("tokenizer.ggml.tokens")
             .unwrap_or_else(|_| (0..vocab_size).map(|i| format!("<token{}>", i)).collect());
+        let vocab_scores = reader.get_f32_array("tokenizer.ggml.scores")
+            .unwrap_or_else(|_| vec![0.0; vocab_size]);
+        let vocab_types_raw = reader.get_i32_array("tokenizer.ggml.token_type")
+            .unwrap_or_else(|_| vec![1; vocab_size]);
+        let vocab_types: Vec<tokenizer::TokenType> = vocab_types_raw
+            .iter()
+            .map(|&v| tokenizer::TokenType::from_i32(v))
+            .collect();
         let bos_token_id = reader.get_usize_any(&[
             "tokenizer.ggml.bos_token_id",
-            "tokenizer.ggml.add_bos_token",
         ]).unwrap_or(1);
         let eos_token_id = reader.get_usize_any(&[
             "tokenizer.ggml.eos_token_id",
@@ -484,6 +497,8 @@ impl Model {
             n_layers,
             rope_theta,
             vocab_tokens,
+            vocab_scores,
+            vocab_types,
             bos_token_id,
             eos_token_id,
             unk_token_id,
