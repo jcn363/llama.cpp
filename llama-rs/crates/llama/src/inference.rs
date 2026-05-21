@@ -270,7 +270,7 @@ pub fn apply_top_p(logits: &[f32], p: f32) -> Vec<f32> {
     
     // Create filtered logits
     let mut result = vec![f32::NEG_INFINITY; logits.len()];
-    for (i, (idx, _)) in indexed.iter().enumerate().take(cutoff_idx) {
+    for (idx, _) in indexed.iter().take(cutoff_idx) {
         result[*idx] = logits[*idx];
     }
     
