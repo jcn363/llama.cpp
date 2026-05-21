@@ -14,7 +14,7 @@ pub mod tokenizer;
 use crate::kv_cache::KvCache;
 use crate::inference::{embed_token, rms_norm, mat_vec, mul_vec, add_vec, silu, sample_argmax};
 pub use crate::tokenizer::SimpleTokenizer;
-use gguf::{GgufReader, TensorInfo, GgufError};
+use gguf::{GgufReader, TensorInfo, GgufError, GgufValue};
 use rayon::prelude::*;
 
 /// Simple struct to hold a tensor that can be lazily de‑quantized.
@@ -89,6 +89,16 @@ pub struct Model {
     pub max_seq_len: usize,
     pub vocab_size: usize,
     pub n_ff: usize,
+    /// Tokenizer vocabulary loaded from GGUF metadata.
+    pub vocab_tokens: Vec<String>,
+    /// BOS token ID.
+    pub bos_token_id: usize,
+    /// EOS token ID.
+    pub eos_token_id: usize,
+    /// Unknown token ID.
+    pub unk_token_id: usize,
+    /// Whether to add BOS token automatically.
+    pub add_bos_token: bool,
     /// KV cache used during inference.
     pub kv_cache: KvCache,
 }
@@ -126,7 +136,15 @@ pub struct InferenceContext {
 impl InferenceContext {
     /// Create a new inference context.
     pub fn new(model: Arc<Model>, config: ModelConfig) -> Self {
-        Self { model, config, tokenizer: SimpleTokenizer::new() }
+        // Create tokenizer from model's vocabulary
+        let tokenizer = SimpleTokenizer::from_gguf_vocab(
+            model.vocab_tokens.clone(),
+            model.bos_token_id,
+            model.eos_token_id,
+            model.unk_token_id,
+            model.add_bos_token,
+        );
+        Self { model, config, tokenizer }
     }
     /// Encode input text to token ids using the tokenizer.
     pub fn encode(&self, text: &str) -> Vec<usize> {
@@ -375,6 +393,25 @@ impl Model {
         // 5️⃣ Initialise the KV cache.
         let kv_cache = KvCache::new(max_seq_len, n_head, d_head);
 
+        // 6️⃣ Extract tokenizer data from GGUF metadata.
+        //    Try both naming conventions and provide defaults.
+        let vocab_tokens = reader.get_string_array("tokenizer.ggml.tokens")
+            .unwrap_or_else(|_| (0..vocab_size).map(|i| format!("<token{}>", i)).collect());
+        let bos_token_id = reader.get_usize_any(&[
+            "tokenizer.ggml.bos_token_id",
+            "tokenizer.ggml.add_bos_token",
+        ]).unwrap_or(1);
+        let eos_token_id = reader.get_usize_any(&[
+            "tokenizer.ggml.eos_token_id",
+        ]).unwrap_or(2);
+        let unk_token_id = reader.get_usize_any(&[
+            "tokenizer.ggml.unknown_token_id",
+        ]).unwrap_or(0);
+        let add_bos_token = match reader.get_kv("tokenizer.ggml.add_bos_token") {
+            Some(GgufValue::Bool(b)) => *b,
+            _ => true, // Default to adding BOS for Llama models
+        };
+
         Ok(Self {
             tensors,
             interned,
@@ -385,6 +422,11 @@ impl Model {
             max_seq_len,
             vocab_size,
             n_ff,
+            vocab_tokens,
+            bos_token_id,
+            eos_token_id,
+            unk_token_id,
+            add_bos_token,
             kv_cache,
         })
     }

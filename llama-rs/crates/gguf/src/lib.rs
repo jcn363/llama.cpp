@@ -528,6 +528,101 @@ impl GgufReader {
         Err(GgufError::DecodeError(format!("none of the metadata keys found: {:?}", keys)))
     }
 
+    /// Get a string metadata value by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GgufError::DecodeError` if the key is missing or has an
+    /// unexpected type.
+    pub fn get_string(&self, key: &str) -> GgufResult<String> {
+        match self.get_kv(key) {
+            Some(GgufValue::Str(s)) => Ok(s.clone()),
+            Some(other) => Err(GgufError::DecodeError(format!("metadata key '{key}' has unexpected type: {other:?}"))),
+            None => Err(GgufError::DecodeError(format!("metadata key '{key}' not found"))),
+        }
+    }
+
+    /// Get an array of strings metadata value by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GgufError::DecodeError` if the key is missing, has an
+    /// unexpected type, or the array contains non-string elements.
+    pub fn get_string_array(&self, key: &str) -> GgufResult<Vec<String>> {
+        match self.get_kv(key) {
+            Some(GgufValue::Array { elem_type, data }) => {
+                if *elem_type != GgufType::String {
+                    return Err(GgufError::DecodeError(format!("metadata key '{key}' expected string array, got {elem_type:?}")));
+                }
+                let mut result = Vec::with_capacity(data.len());
+                for val in data {
+                    if let GgufValue::Str(s) = val {
+                        result.push(s.clone());
+                    } else {
+                        return Err(GgufError::DecodeError(format!("metadata key '{key}' contains non-string element")));
+                    }
+                }
+                Ok(result)
+            }
+            Some(other) => Err(GgufError::DecodeError(format!("metadata key '{key}' has unexpected type: {other:?}"))),
+            None => Err(GgufError::DecodeError(format!("metadata key '{key}' not found"))),
+        }
+    }
+
+    /// Get an array of f32 metadata value by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GgufError::DecodeError` if the key is missing, has an
+    /// unexpected type, or the array contains non-f32 elements.
+    pub fn get_f32_array(&self, key: &str) -> GgufResult<Vec<f32>> {
+        match self.get_kv(key) {
+            Some(GgufValue::Array { elem_type, data }) => {
+                if *elem_type != GgufType::Float32 {
+                    return Err(GgufError::DecodeError(format!("metadata key '{key}' expected f32 array, got {elem_type:?}")));
+                }
+                let mut result = Vec::with_capacity(data.len());
+                for val in data {
+                    if let GgufValue::F32(v) = val {
+                        result.push(*v);
+                    } else {
+                        return Err(GgufError::DecodeError(format!("metadata key '{key}' contains non-f32 element")));
+                    }
+                }
+                Ok(result)
+            }
+            Some(other) => Err(GgufError::DecodeError(format!("metadata key '{key}' has unexpected type: {other:?}"))),
+            None => Err(GgufError::DecodeError(format!("metadata key '{key}' not found"))),
+        }
+    }
+
+    /// Get an array of i32 metadata value by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `GgufError::DecodeError` if the key is missing, has an
+    /// unexpected type, or the array contains non-i32 elements.
+    pub fn get_i32_array(&self, key: &str) -> GgufResult<Vec<i32>> {
+        match self.get_kv(key) {
+            Some(GgufValue::Array { elem_type, data }) => {
+                if *elem_type != GgufType::Int32 {
+                    return Err(GgufError::DecodeError(format!("metadata key '{key}' expected i32 array, got {elem_type:?}")));
+                }
+                let mut result = Vec::with_capacity(data.len());
+                for val in data {
+                    if let GgufValue::I32(v) = val {
+                        result.push(*v);
+                    } else {
+                        return Err(GgufError::DecodeError(format!("metadata key '{key}' contains non-i32 element")));
+                    }
+                }
+                Ok(result)
+            }
+            Some(other) => Err(GgufError::DecodeError(format!("metadata key '{key}' has unexpected type: {other:?}"))),
+            None => Err(GgufError::DecodeError(format!("metadata key '{key}' not found"))),
+        }
+    }
+
     /// Load raw tensor bytes for a given `TensorInfo`.
     ///
     /// # Errors
