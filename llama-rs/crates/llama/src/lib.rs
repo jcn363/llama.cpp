@@ -11,7 +11,8 @@ mod attention;
 mod inference;
 pub mod tokenizer;
 
-use crate::kv_cache::KvCache;
+use crate::kv_cache::KvCacheManager;
+use crate::attention::multi_head_attention_with_cache;
 use crate::inference::{embed_token, rms_norm, mat_vec, mul_vec, add_vec, silu, sample_argmax};
 pub use crate::tokenizer::SimpleTokenizer;
 use gguf::{GgufReader, TensorInfo, GgufError, GgufValue};
@@ -89,6 +90,9 @@ pub struct Model {
     pub max_seq_len: usize,
     pub vocab_size: usize,
     pub n_ff: usize,
+    pub n_layers: usize,
+    /// RoPE base frequency.
+    pub rope_theta: f32,
     /// Tokenizer vocabulary loaded from GGUF metadata.
     pub vocab_tokens: Vec<String>,
     /// BOS token ID.
@@ -99,8 +103,8 @@ pub struct Model {
     pub unk_token_id: usize,
     /// Whether to add BOS token automatically.
     pub add_bos_token: bool,
-    /// KV cache used during inference.
-    pub kv_cache: KvCache,
+    /// KV cache used during inference (one per layer).
+    pub kv_cache: RwLock<KvCacheManager>,
 }
 
 
@@ -199,12 +203,16 @@ impl InferenceContext {
         let token_embd = self.model.get_tensor("token_embd.weight")?;
         let mut x = embed_token(token_id, &token_embd, self.model.n_embd)?;
         
-        // Get the number of layers
         let n_layers = self.model.n_layers();
         if n_layers == 0 {
-            // No layers found, return zeros as logits
             return Ok(vec![0.0; self.model.vocab_size]);
         }
+        
+        let n_head = self.model.n_head;
+        let n_head_kv = self.model.n_head_kv;
+        let head_dim = self.model.d_head;
+        let n_embd = self.model.n_embd;
+        let rope_theta = self.model.rope_theta;
         
         // Apply each transformer block
         for layer_idx in 0..n_layers {
@@ -217,8 +225,58 @@ impl InferenceContext {
                 x = rms_norm(&x, &attn_norm_weight, 1e-5);
             }
             
-            // For now, skip actual attention computation (would need Q,K,V projections)
-            // Just pass through the normalized embedding
+            // Get Q, K, V projection weights
+            let q_proj_name = format!("blk.{}.attn_q.weight", layer_idx);
+            let k_proj_name = format!("blk.{}.attn_k.weight", layer_idx);
+            let v_proj_name = format!("blk.{}.attn_v.weight", layer_idx);
+            
+            if let (Ok(q_weight), Ok(k_weight), Ok(v_weight)) = (
+                self.model.get_tensor(&q_proj_name),
+                self.model.get_tensor(&k_proj_name),
+                self.model.get_tensor(&v_proj_name),
+            ) {
+                // Project x to Q, K, V
+                // Q: (n_embd, n_head * head_dim) @ x -> (n_head * head_dim)
+                let mut q = mat_vec(&q_weight, n_head * head_dim, n_embd, &x);
+                let mut k = mat_vec(&k_weight, n_head_kv * head_dim, n_embd, &x);
+                let v = mat_vec(&v_weight, n_head_kv * head_dim, n_embd, &x);
+                
+                // Get current position in KV cache
+                let kv_cache = self.model.kv_cache.write().unwrap();
+                let position_offset = kv_cache.get_layer_ref(layer_idx).cur_len;
+                drop(kv_cache);
+                
+                // Apply attention with KV cache
+                let mut kv_cache = self.model.kv_cache.write().unwrap();
+                let attn_output = multi_head_attention_with_cache(
+                    n_head,
+                    n_head_kv,
+                    head_dim,
+                    1, // seq_len = 1 for single token generation
+                    position_offset,
+                    &mut q,
+                    &mut k,
+                    &v,
+                    kv_cache.get_layer(layer_idx),
+                    rope_theta,
+                );
+                drop(kv_cache);
+                
+                // Output projection
+                let attn_out_name = format!("blk.{}.attn_output.weight", layer_idx);
+                if let Ok(attn_out_weight) = self.model.get_tensor(&attn_out_name) {
+                    let attn_proj = mat_vec(&attn_out_weight, n_embd, n_head * head_dim, &attn_output);
+                    x = add_vec(&residual, &attn_proj);
+                } else {
+                    x = add_vec(&residual, &attn_output);
+                }
+            } else {
+                // If QKV weights not found, just use residual
+                x = residual;
+            }
+            
+            // Save residual for FFN
+            let ffn_residual = x.clone();
             
             // FFN norm
             let ffn_norm_name = format!("blk.{}.ffn_norm.weight", layer_idx);
@@ -237,19 +295,19 @@ impl InferenceContext {
                 self.model.get_tensor(&down_name),
             ) {
                 // gate_proj = gate @ x
-                let gate_proj = mat_vec(&gate, self.model.n_ff, self.model.n_embd, &x);
+                let gate_proj = mat_vec(&gate, self.model.n_ff, n_embd, &x);
                 // up_proj = up @ x
-                let up_proj = mat_vec(&up, self.model.n_ff, self.model.n_embd, &x);
+                let up_proj = mat_vec(&up, self.model.n_ff, n_embd, &x);
                 // silu(gate_proj) * up_proj
                 let silu_gate = silu(&gate_proj);
                 let ffn_hidden = mul_vec(&silu_gate, &up_proj);
                 // down_proj = down @ ffn_hidden
-                let ffn_output = mat_vec(&down, self.model.n_embd, self.model.n_ff, &ffn_hidden);
+                let ffn_output = mat_vec(&down, n_embd, self.model.n_ff, &ffn_hidden);
                 // Residual connection
-                x = add_vec(&residual, &ffn_output);
+                x = add_vec(&ffn_residual, &ffn_output);
             } else {
                 // If FFN tensors not found, just use residual
-                x = residual;
+                x = ffn_residual;
             }
         }
         
@@ -260,11 +318,11 @@ impl InferenceContext {
         
         // Output projection to logits
         if let Ok(output_weight) = self.model.get_tensor("output.weight") {
-            let logits = mat_vec(&output_weight, self.model.vocab_size, self.model.n_embd, &x);
+            let logits = mat_vec(&output_weight, self.model.vocab_size, n_embd, &x);
             Ok(logits)
         } else {
             // Tied embeddings: use token_embd.weight as output
-            let logits = mat_vec(&token_embd, self.model.vocab_size, self.model.n_embd, &x);
+            let logits = mat_vec(&token_embd, self.model.vocab_size, n_embd, &x);
             Ok(logits)
         }
     }
@@ -286,8 +344,8 @@ impl Model {
     /// Return a short summary string for debugging.
     pub fn summary(&self) -> String {
         format!(
-            "Model: embd={}, heads={}, kv_heads={}, d_head={}, seq_len={}",
-            self.n_embd, self.n_head, self.n_head_kv, self.d_head, self.max_seq_len
+            "Model: embd={}, heads={}, kv_heads={}, d_head={}, layers={}, seq_len={}, rope_theta={}",
+            self.n_embd, self.n_head, self.n_head_kv, self.d_head, self.n_layers, self.max_seq_len, self.rope_theta
         )
     }
 
@@ -308,19 +366,9 @@ impl Model {
         self.tensors.get(&id).map(|t| t.shape.clone())
     }
 
-    /// Count the number of transformer blocks in the model.
+    /// Return the number of transformer blocks in the model.
     pub fn n_layers(&self) -> usize {
-        // Try to find the highest block index by checking for attn_norm tensors.
-        let mut max_layer = 0;
-        for i in 0..1000 {
-            let name = format!("blk.{}.attn_norm.weight", i);
-            if self.get_tensor(&name).is_ok() {
-                max_layer = i + 1;
-            } else {
-                break;
-            }
-        }
-        max_layer
+        self.n_layers
     }
 }
 
@@ -365,6 +413,17 @@ impl Model {
             "general.feed_forward_length",
             "llama.intermediate_size",
         ]).unwrap_or(n_embd * 4);
+        // n_layers is required
+        let n_layers = reader.get_usize_any(&[
+            "llama.block_count",
+            "general.block_count",
+        ])?;
+        // rope_theta is optional, default to 10000.0
+        let rope_theta = match reader.get_kv("llama.rope.freq_base") {
+            Some(GgufValue::F32(v)) => *v,
+            Some(GgufValue::F64(v)) => *v as f32,
+            _ => 10000.0,
+        };
 
         // 3️⃣ Load all tensors (raw bytes) and intern names in parallel.
         // Use a mutex‑protected interner to safely share across threads.
@@ -390,8 +449,8 @@ impl Model {
             .into_inner()
             .unwrap();
 
-        // 5️⃣ Initialise the KV cache.
-        let kv_cache = KvCache::new(max_seq_len, n_head, d_head);
+        // 5️⃣ Initialise the KV cache (one per layer).
+        let kv_cache = RwLock::new(KvCacheManager::new(n_layers, max_seq_len, n_head_kv, d_head));
 
         // 6️⃣ Extract tokenizer data from GGUF metadata.
         //    Try both naming conventions and provide defaults.
@@ -422,6 +481,8 @@ impl Model {
             max_seq_len,
             vocab_size,
             n_ff,
+            n_layers,
+            rope_theta,
             vocab_tokens,
             bos_token_id,
             eos_token_id,

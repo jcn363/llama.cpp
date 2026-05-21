@@ -9,8 +9,8 @@ fn create_test_gguf(path: &std::path::Path) -> std::io::Result<()> {
     // Header
     f.write_all(&0x4655_4747u32.to_le_bytes())?; // GGUF magic
     f.write_all(&3u32.to_le_bytes())?; // version
-    f.write_all(&7i64.to_le_bytes())?; // tensor count
-    f.write_all(&10i64.to_le_bytes())?; // kv count
+    f.write_all(&11i64.to_le_bytes())?; // tensor count
+    f.write_all(&11i64.to_le_bytes())?; // kv count
     
     // Helper to write a string
     let mut write_string = |f: &mut std::fs::File, s: &str| -> std::io::Result<()> {
@@ -35,7 +35,7 @@ fn create_test_gguf(path: &std::path::Path) -> std::io::Result<()> {
         Ok(())
     };
     
-    // KV pairs (10 total)
+    // KV pairs (11 total)
     write_kv_str(&mut f, "general.version", "1.0")?;
     write_kv_u32(&mut f, "general.vocab_size", 4)?;
     write_kv_u32(&mut f, "general.embedding_length", 8)?;
@@ -44,6 +44,7 @@ fn create_test_gguf(path: &std::path::Path) -> std::io::Result<()> {
     write_kv_u32(&mut f, "general.attention_head_dim", 8)?;
     write_kv_u32(&mut f, "general.context_length", 512)?;
     write_kv_u32(&mut f, "llama.feed_forward_length", 16)?;
+    write_kv_u32(&mut f, "llama.block_count", 1)?;
     write_kv_str(&mut f, "general.architecture", "llama")?;
     write_kv_u32(&mut f, "general.alignment", 32)?;
     
@@ -64,6 +65,10 @@ fn create_test_gguf(path: &std::path::Path) -> std::io::Result<()> {
     write_tensor_info(&mut f, "output.weight", &[4, 8], 0)?;
     write_tensor_info(&mut f, "output_norm.weight", &[8], 0)?;
     write_tensor_info(&mut f, "blk.0.attn_norm.weight", &[8], 0)?;
+    write_tensor_info(&mut f, "blk.0.attn_q.weight", &[8, 8], 0)?;
+    write_tensor_info(&mut f, "blk.0.attn_k.weight", &[8, 8], 0)?;
+    write_tensor_info(&mut f, "blk.0.attn_v.weight", &[8, 8], 0)?;
+    write_tensor_info(&mut f, "blk.0.attn_output.weight", &[8, 8], 0)?;
     write_tensor_info(&mut f, "blk.0.ffn_norm.weight", &[8], 0)?;
     write_tensor_info(&mut f, "blk.0.ffn_gate.weight", &[16, 8], 0)?;
     write_tensor_info(&mut f, "blk.0.ffn_up.weight", &[16, 8], 0)?;
@@ -97,6 +102,22 @@ fn create_test_gguf(path: &std::path::Path) -> std::io::Result<()> {
     
     // blk.0.attn_norm.weight: [8]
     write_tensor(&mut f, &norm)?;
+    
+    // blk.0.attn_q.weight: [8, 8] = 64 floats
+    let q_weight: Vec<f32> = (0..64).map(|_| rng.f32()).collect();
+    write_tensor(&mut f, &q_weight)?;
+    
+    // blk.0.attn_k.weight: [8, 8] = 64 floats
+    let k_weight: Vec<f32> = (0..64).map(|_| rng.f32()).collect();
+    write_tensor(&mut f, &k_weight)?;
+    
+    // blk.0.attn_v.weight: [8, 8] = 64 floats
+    let v_weight: Vec<f32> = (0..64).map(|_| rng.f32()).collect();
+    write_tensor(&mut f, &v_weight)?;
+    
+    // blk.0.attn_output.weight: [8, 8] = 64 floats
+    let attn_out: Vec<f32> = (0..64).map(|_| rng.f32()).collect();
+    write_tensor(&mut f, &attn_out)?;
     
     // blk.0.ffn_norm.weight: [8]
     write_tensor(&mut f, &norm)?;
