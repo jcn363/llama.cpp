@@ -95,3 +95,179 @@ pub fn add_vec(a: &[f32], b: &[f32]) -> Vec<f32> {
 pub fn scale_vec(v: &[f32], scale: f32) -> Vec<f32> {
     v.iter().map(|x| x * scale).collect()
 }
+
+/// Apply temperature to logits and compute softmax.
+///
+/// Temperature controls the randomness of the distribution:
+/// - `temp < 1`: More confident/deterministic
+/// - `temp = 1`: Original distribution
+/// - `temp > 1`: More random/diverse
+///
+/// Returns probabilities that sum to 1.
+pub fn softmax_with_temperature(logits: &[f32], temperature: f32) -> Vec<f32> {
+    if logits.is_empty() {
+        return vec![];
+    }
+    
+    let temp = if temperature <= 0.0 { 1e-6 } else { temperature };
+    let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    
+    let mut probs = Vec::with_capacity(logits.len());
+    let mut sum = 0.0f32;
+    
+    for &v in logits {
+        let exp_val = ((v - max) / temp).exp();
+        probs.push(exp_val);
+        sum += exp_val;
+    }
+    
+    for p in &mut probs {
+        *p /= sum;
+    }
+    
+    probs
+}
+
+/// Apply top-k filtering to logits.
+///
+/// Keeps only the k highest probability tokens, setting all others to -infinity.
+/// If k >= vocab_size, returns logits unchanged.
+pub fn apply_top_k(logits: &[f32], k: usize) -> Vec<f32> {
+    if k >= logits.len() || k == 0 {
+        return logits.to_vec();
+    }
+    
+    let mut result = logits.to_vec();
+    
+    // Find the k-th largest value
+    let mut sorted: Vec<f32> = logits.to_vec();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let threshold = sorted[k - 1];
+    
+    // Set all values below threshold to -infinity
+    for v in &mut result {
+        if *v < threshold {
+            *v = f32::NEG_INFINITY;
+        }
+    }
+    
+    result
+}
+
+/// Apply top-p (nucleus) filtering to logits.
+///
+/// Keeps only the smallest set of tokens whose cumulative probability exceeds p.
+/// Returns filtered logits with non-selected tokens set to -infinity.
+pub fn apply_top_p(logits: &[f32], p: f32) -> Vec<f32> {
+    if p >= 1.0 || p <= 0.0 {
+        return logits.to_vec();
+    }
+    
+    // Create index-value pairs and sort by value descending
+    let mut indexed: Vec<(usize, f32)> = logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    
+    // Compute cumulative sum and find cutoff
+    let mut cumsum = 0.0f32;
+    let mut cutoff_idx = indexed.len();
+    
+    // First compute softmax for cumulative probability
+    let max = indexed.iter().map(|(_, v)| *v).fold(f32::NEG_INFINITY, f32::max);
+    let exp_sum: f32 = indexed.iter().map(|(_, v)| (v - max).exp()).sum();
+    
+    for (i, (_, v)) in indexed.iter().enumerate() {
+        let prob = (v - max).exp() / exp_sum;
+        cumsum += prob;
+        if cumsum > p {
+            cutoff_idx = i + 1;
+            break;
+        }
+    }
+    
+    // Create filtered logits
+    let mut result = vec![f32::NEG_INFINITY; logits.len()];
+    for (i, (idx, _)) in indexed.iter().enumerate().take(cutoff_idx) {
+        result[*idx] = logits[*idx];
+    }
+    
+    result
+}
+
+/// Sample from a categorical distribution.
+///
+/// Uses a simple linear search through cumulative probabilities.
+/// `probs` should sum to 1.0.
+pub fn sample_categorical(probs: &[f32], rng: &mut fastrand::Rng) -> usize {
+    let rand_val = rng.f32();
+    let mut cumsum = 0.0f32;
+    
+    for (i, &p) in probs.iter().enumerate() {
+        cumsum += p;
+        if rand_val <= cumsum {
+            return i;
+        }
+    }
+    
+    // Fallback to last token (shouldn't happen with valid probabilities)
+    probs.len() - 1
+}
+
+/// Sampling configuration for text generation.
+#[derive(Debug, Clone, Copy)]
+pub struct SamplingConfig {
+    /// Temperature for softmax (default: 0.8).
+    pub temperature: f32,
+    /// Top-k filtering (default: 40). 0 = disabled.
+    pub top_k: usize,
+    /// Top-p (nucleus) filtering (default: 0.95). 0.0 = disabled.
+    pub top_p: f32,
+    /// Random seed for reproducibility (default: random).
+    pub seed: Option<u64>,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            temperature: 0.8,
+            top_k: 40,
+            top_p: 0.95,
+            seed: None,
+        }
+    }
+}
+
+/// Sample the next token from logits using the given configuration.
+///
+/// Applies temperature, top-k, top-p filtering, then samples categorically.
+/// If temperature is 0, uses greedy argmax sampling.
+pub fn sample_logits(logits: &[f32], config: &SamplingConfig) -> usize {
+    // Greedy sampling when temperature is 0
+    if config.temperature <= 0.0 {
+        return sample_argmax(logits);
+    }
+    
+    let mut rng = fastrand::Rng::new();
+    if let Some(seed) = config.seed {
+        rng = fastrand::Rng::with_seed(seed);
+    }
+    
+    // Apply top-k filtering
+    let filtered = if config.top_k > 0 && config.top_k < logits.len() {
+        apply_top_k(logits, config.top_k)
+    } else {
+        logits.to_vec()
+    };
+    
+    // Apply top-p filtering
+    let filtered = if config.top_p > 0.0 && config.top_p < 1.0 {
+        apply_top_p(&filtered, config.top_p)
+    } else {
+        filtered
+    };
+    
+    // Apply temperature and compute probabilities
+    let probs = softmax_with_temperature(&filtered, config.temperature);
+    
+    // Sample from the distribution
+    sample_categorical(&probs, &mut rng)
+}

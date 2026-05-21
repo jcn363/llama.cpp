@@ -13,7 +13,7 @@ pub mod tokenizer;
 
 use crate::kv_cache::KvCacheManager;
 use crate::attention::multi_head_attention_with_cache;
-use crate::inference::{embed_token, rms_norm, mat_vec, mul_vec, add_vec, silu, sample_argmax};
+use crate::inference::{embed_token, rms_norm, mat_vec, mul_vec, add_vec, silu, sample_logits, SamplingConfig};
 pub use crate::tokenizer::SimpleTokenizer;
 use gguf::{GgufReader, TensorInfo, GgufError, GgufValue};
 use rayon::prelude::*;
@@ -138,7 +138,7 @@ pub struct InferenceContext {
     pub model: Arc<Model>,
     pub config: ModelConfig,
     pub tokenizer: SimpleTokenizer,
-    // In a full implementation, this would hold KV cache, etc.
+    pub sampling: SamplingConfig,
 }
 
 impl InferenceContext {
@@ -154,7 +154,13 @@ impl InferenceContext {
             model.unk_token_id,
             model.add_bos_token,
         );
-        Self { model, config, tokenizer }
+        Self { model, config, tokenizer, sampling: SamplingConfig::default() }
+    }
+    
+    /// Set the sampling configuration.
+    pub fn with_sampling(mut self, sampling: SamplingConfig) -> Self {
+        self.sampling = sampling;
+        self
     }
     /// Encode input text to token ids using the tokenizer.
     pub fn encode(&self, text: &str) -> Vec<usize> {
@@ -163,10 +169,10 @@ impl InferenceContext {
 
     /// Generate token IDs for a prompt using actual inference.
     /// 
-    /// This is a simplified implementation that:
+    /// This implementation:
     /// 1. Encodes the prompt to token IDs
     /// 2. For each predicted token, runs a forward pass through the model
-    /// 3. Samples the next token greedily from the output logits
+    /// 3. Samples the next token using temperature/top-k/top-p sampling
     pub fn generate(&self, prompt: &str, n_predict: usize) -> anyhow::Result<Vec<usize>> {
         let mut toks = self.encode(prompt);
         
@@ -176,19 +182,19 @@ impl InferenceContext {
         }
         
         // Generate new tokens
-        for _ in 0..n_predict {
+        for i in 0..n_predict {
             // Get the last token
             let last_token = *toks.last().unwrap_or(&0);
             
             // Run forward pass to get logits for next token
             match self.forward_pass(last_token) {
                 Ok(logits) => {
-                    // Sample next token greedily
-                    let next_token = sample_argmax(&logits);
+                    // Sample next token using configured sampling
+                    let next_token = sample_logits(&logits, &self.sampling);
                     toks.push(next_token);
                     
-                    // Stop if we hit end-of-sequence token (usually 2)
-                    if next_token == 2 {
+                    // Stop if we hit end-of-sequence token
+                    if next_token == self.model.eos_token_id {
                         break;
                     }
                 }
