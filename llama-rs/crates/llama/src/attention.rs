@@ -1,8 +1,79 @@
 // Complete multi-head attention implementation with RoPE and KV cache.
 // Supports MHA, GQA (Grouped Query Attention), and MQA (Multi-Query Attention).
+// Includes flash attention for memory-efficient prefill.
 
 use crate::dot_product;
 use crate::kv_cache::KvCache;
+
+/// Flash attention: compute softmax(Q @ K^T) @ V in a single pass without materializing the full attention matrix.
+/// Uses the online softmax trick: track running max and sum to compute softmax incrementally.
+///
+/// Memory complexity: O(N * head_dim) instead of O(N²)
+/// where N = seq_len (context length)
+///
+/// # Arguments
+/// * `q` - Query vector of shape (1, head_dim) for current token
+/// * `k_cache` - Cached keys as slice of slices: each element is a head_dim-length slice
+/// * `v_cache` - Cached values as slice of slices: each element is a head_dim-length slice
+/// * `seq_len` - Current sequence length (number of cached tokens)
+/// * `head_dim` - Dimension of each head
+///
+/// # Returns
+/// Output vector of shape (1, head_dim)
+fn flash_attention_head(
+    q: &[f32],
+    k_cache: &[&[f32]],
+    v_cache: &[&[f32]],
+    seq_len: usize,
+    head_dim: usize,
+) -> Vec<f32> {
+    assert_eq!(q.len(), head_dim);
+    assert_eq!(k_cache.len(), seq_len);
+    assert_eq!(v_cache.len(), seq_len);
+
+    let scale = 1.0 / (head_dim as f32).sqrt();
+
+    // Online softmax: track running max and sum
+    let mut max_val = f32::NEG_INFINITY;
+    let mut sum_exp = 0.0f32;
+    let mut output = vec![0.0f32; head_dim];
+
+    // Single pass: compute scores, update max/sum, accumulate weighted V
+    for j in 0..seq_len {
+        let k_row = k_cache[j];
+        let score = dot_product(q, k_row) * scale;
+
+        // Update running max and sum
+        let prev_max = max_val;
+        if score > max_val {
+            max_val = score;
+        }
+        let exp_val = (score - max_val).exp();
+
+        // Rescale previous output and sum
+        let rescale = (prev_max - max_val).exp();
+        sum_exp = sum_exp * rescale + exp_val;
+        for d in 0..head_dim {
+            output[d] = output[d] * rescale;
+        }
+
+        // Add weighted V
+        let v_row = v_cache[j];
+        for d in 0..head_dim {
+            output[d] += exp_val * v_row[d];
+        }
+    }
+
+    // Normalize by sum
+    if sum_exp > 0.0 {
+        let inv_sum = 1.0 / sum_exp;
+        for d in 0..head_dim {
+            output[d] *= inv_sum;
+        }
+    }
+
+    output
+}
 
 /// Apply Rotary Position Embedding (RoPE) to Q and K vectors.
 ///
@@ -42,17 +113,8 @@ pub fn apply_rope(x: &mut [f32], seq_len: usize, head_dim: usize, position_offse
 }
 
 /// Compute scaled dot-product attention for a single head with causal masking.
-///
-/// # Arguments
-/// * `q` - Query vector of shape (1, head_dim) for current token
-/// * `k_cache` - Cached keys of shape (seq_len, head_dim)
-/// * `v_cache` - Cached values of shape (seq_len, head_dim)
-/// * `seq_len` - Current sequence length (number of cached tokens)
-/// * `head_dim` - Dimension of each head
-/// * `scores` - Pre-allocated buffer of size `seq_len`
-///
-/// # Returns
-/// Output vector of shape (1, head_dim)
+/// (Legacy implementation, kept for reference. Flash attention is preferred.)
+#[allow(dead_code)]
 fn attention_head_with_cache(
     q: &[f32],
     k_cache: &[f32],
@@ -151,10 +213,7 @@ pub fn multi_head_attention_with_cache(
     
     let total_seq_len = position_offset + seq_len;
     let n_rep = n_head / n_head_kv; // Number of query heads per KV head (for GQA)
-    
-    // Pre-allocate scores buffer (reused across heads)
-    let mut scores = vec![0.0f32; total_seq_len];
-    
+
     // Compute attention for each query head
     let mut output = vec![0.0f32; seq_len * n_head * head_dim];
     
@@ -170,35 +229,47 @@ pub fn multi_head_attention_with_cache(
             // Get cached keys and values for the corresponding KV head
             let k_cache = kv_cache.get_head_keys(kv_head, total_seq_len);
             let v_cache = kv_cache.get_head_values(kv_head, total_seq_len);
-            
-            // Flatten cached keys and values for this head
-            let k_flat: Vec<f32> = k_cache.iter().flat_map(|s| s.iter().copied()).collect();
-            let v_flat: Vec<f32> = v_cache.iter().flat_map(|s| s.iter().copied()).collect();
-            
-            // Compute attention
-            let out = attention_head_with_cache(
+
+            // Convert to slice-of-slices for flash attention
+            let k_refs: Vec<&[f32]> = k_cache.iter().map(|s| &s[..]).collect();
+            let v_refs: Vec<&[f32]> = v_cache.iter().map(|s| &s[..]).collect();
+
+            // Use flash attention: single pass, O(N) memory
+            let out = flash_attention_head(
                 q_vec,
-                &k_flat,
-                &v_flat,
+                &k_refs,
+                &v_refs,
                 total_seq_len,
                 head_dim,
-                &mut scores,
             );
-            
+
             // Store output
             let out_offset = pos * n_head * head_dim + h * head_dim;
             output[out_offset..out_offset + head_dim].copy_from_slice(&out);
         }
     }
-    
+
     output
 }
 
-/// Simple multi-head attention without KV cache (for batch processing).
+/// Flash attention for prefill phase (multi-token processing).
 ///
-/// This is a simplified version that processes all tokens at once.
-/// Used for prompt encoding (prefill phase).
-#[allow(dead_code)]
+/// Uses online softmax to compute attention in a single pass without
+/// materializing the full seq_len × seq_len attention matrix.
+/// Memory complexity: O(seq_len * head_dim) instead of O(seq_len²).
+///
+/// # Arguments
+/// * `n_head` - Number of query heads
+/// * `n_head_kv` - Number of key/value heads (for GQA/MQA)
+/// * `head_dim` - Dimension of each head
+/// * `seq_len` - Sequence length
+/// * `q` - Query projections, shape (seq_len, n_head * head_dim)
+/// * `k` - Key projections, shape (seq_len, n_head_kv * head_dim)
+/// * `v` - Value projections, shape (seq_len, n_head_kv * head_dim)
+/// * `rope_theta` - RoPE base frequency
+///
+/// # Returns
+/// Attention output of shape (seq_len, n_head * head_dim)
 pub fn multi_head_attention_prefill(
     n_head: usize,
     n_head_kv: usize,
@@ -212,61 +283,65 @@ pub fn multi_head_attention_prefill(
     assert_eq!(q.len(), seq_len * n_head * head_dim);
     assert_eq!(k.len(), seq_len * n_head_kv * head_dim);
     assert_eq!(v.len(), seq_len * n_head_kv * head_dim);
-    
+
     // Apply RoPE to Q and K
     apply_rope(q, seq_len, head_dim, 0, rope_theta);
     apply_rope(k, seq_len, head_dim, 0, rope_theta);
-    
+
     let n_rep = n_head / n_head_kv;
-    let mut scores = vec![0.0f32; seq_len * seq_len];
     let mut output = vec![0.0f32; seq_len * n_head * head_dim];
-    
+    let scale = 1.0 / (head_dim as f32).sqrt();
+
     for h in 0..n_head {
         let kv_head = h / n_rep;
-        
+
         for i in 0..seq_len {
-            // Get query for position i
             let q_offset = i * n_head * head_dim + h * head_dim;
             let q_vec = &q[q_offset..q_offset + head_dim];
-            
-            // Compute attention scores for all positions j <= i (causal mask)
+
+            // Online softmax: single pass over causal context
             let mut max_val = f32::NEG_INFINITY;
-            let row_start = i * seq_len;
-            
+            let mut sum_exp = 0.0f32;
+            let out_offset = i * n_head * head_dim + h * head_dim;
+            let mut out_vec = vec![0.0f32; head_dim];
+
             for j in 0..=i {
                 let k_offset = j * n_head_kv * head_dim + kv_head * head_dim;
                 let k_vec = &k[k_offset..k_offset + head_dim];
-                let val = dot_product(q_vec, k_vec) / (head_dim as f32).sqrt();
-                scores[row_start + j] = val;
-                if val > max_val {
-                    max_val = val;
+                let score = dot_product(q_vec, k_vec) * scale;
+
+                let prev_max = max_val;
+                if score > max_val {
+                    max_val = score;
+                }
+                let exp_val = (score - max_val).exp();
+
+                // Rescale
+                let rescale = (prev_max - max_val).exp();
+                sum_exp = sum_exp * rescale + exp_val;
+                for d in 0..head_dim {
+                    out_vec[d] *= rescale;
+                }
+
+                // Accumulate weighted V
+                let v_offset = j * n_head_kv * head_dim + kv_head * head_dim;
+                for d in 0..head_dim {
+                    out_vec[d] += exp_val * v[v_offset + d];
                 }
             }
-            
-            // Softmax over valid positions
-            let mut sum = 0.0f32;
-            for j in 0..=i {
-                let exp_val = (scores[row_start + j] - max_val).exp();
-                scores[row_start + j] = exp_val;
-                sum += exp_val;
-            }
-            for j in 0..=i {
-                scores[row_start + j] /= sum;
-            }
-            
-            // Weighted sum of V
-            let out_offset = i * n_head * head_dim + h * head_dim;
-            for d in 0..head_dim {
-                let mut val = 0.0f32;
-                for j in 0..=i {
-                    let v_offset = j * n_head_kv * head_dim + kv_head * head_dim + d;
-                    val += scores[row_start + j] * v[v_offset];
+
+            // Normalize
+            if sum_exp > 0.0 {
+                let inv_sum = 1.0 / sum_exp;
+                for d in 0..head_dim {
+                    out_vec[d] *= inv_sum;
                 }
-                output[out_offset + d] = val;
             }
+
+            output[out_offset..out_offset + head_dim].copy_from_slice(&out_vec);
         }
     }
-    
+
     output
 }
 
