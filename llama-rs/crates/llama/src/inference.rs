@@ -44,6 +44,20 @@ pub fn silu(x: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// Apply GELU activation: x * Φ(x) where Φ is the standard Gaussian CDF approximation.
+/// Used by Gemma and other models for GeGLU FFN.
+pub fn gelu(x: &[f32]) -> Vec<f32> {
+    x.iter()
+        .map(|v| {
+            // Approximation: 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+            let sqrt_2_over_pi = 0.7978845608028654;
+            let inner = sqrt_2_over_pi * (v + 0.044715 * v * v * v);
+            let tanh = (inner.exp() - (-inner).exp()) / (inner.exp() + (-inner).exp());
+            0.5 * v * (1.0 + tanh)
+        })
+        .collect()
+}
+
 /// Compute softmax over a vector.
 #[allow(dead_code)]
 pub fn softmax(x: &[f32]) -> Vec<f32> {

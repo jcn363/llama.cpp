@@ -54,7 +54,7 @@ impl ProfileResult {
 
 use crate::kv_cache::KvCacheManager;
 use crate::attention::multi_head_attention_with_cache;
-use crate::inference::{embed_token, rms_norm, mat_vec, mul_vec, add_vec, silu, sample_logits, SamplingConfig};
+use crate::inference::{embed_token, rms_norm, mat_vec, mul_vec, add_vec, silu, gelu, sample_logits, SamplingConfig};
 pub use crate::tokenizer::SimpleTokenizer;
 use gguf::{GgufReader, TensorInfo, MmapTensor, GgufError, GgufValue};
 use rayon::prelude::*;
@@ -124,6 +124,8 @@ pub struct Model {
     pub tensors: HashMap<usize, TensorData>,
     /// Interner for tensor names and other strings.
     pub interned: InternedStrings,
+    /// Model architecture detected from GGUF metadata.
+    pub architecture: String,
     /// Model hyper‑parameters extracted from GGUF metadata.
     pub n_embd: usize,
     pub n_head: usize,
@@ -135,6 +137,8 @@ pub struct Model {
     pub n_layers: usize,
     /// RoPE base frequency.
     pub rope_theta: f32,
+    /// RMSNorm epsilon (architecture-dependent).
+    pub norm_eps: f32,
     /// Tokenizer vocabulary loaded from GGUF metadata.
     pub vocab_tokens: Vec<String>,
     /// Tokenizer scores (for BPE ranking).
@@ -276,7 +280,7 @@ impl InferenceContext {
             // Attention norm
             let attn_norm_name = format!("blk.{}.attn_norm.weight", layer_idx);
             if let Ok(attn_norm_weight) = self.model.get_tensor(&attn_norm_name) {
-                x = rms_norm(&x, &attn_norm_weight, 1e-5);
+                x = rms_norm(&x, &attn_norm_weight, self.model.norm_eps);
             }
             
             // Get Q, K, V projection weights
@@ -335,14 +339,16 @@ impl InferenceContext {
             // FFN norm
             let ffn_norm_name = format!("blk.{}.ffn_norm.weight", layer_idx);
             if let Ok(ffn_norm_weight) = self.model.get_tensor(&ffn_norm_name) {
-                x = rms_norm(&x, &ffn_norm_weight, 1e-5);
+                x = rms_norm(&x, &ffn_norm_weight, self.model.norm_eps);
             }
-            
-            // Apply SwiGLU FFN: FFN(x) = (silu(gate @ x) * up @ x) @ down
+
+            // Apply FFN: SwiGLU for Llama/Mistral, GeGLU for Gemma
+            // SwiGLU: FFN(x) = (silu(gate @ x) * up @ x) @ down
+            // GeGLU: FFN(x) = (gelu(gate @ x) * up @ x) @ down
             let gate_name = format!("blk.{}.ffn_gate.weight", layer_idx);
             let up_name = format!("blk.{}.ffn_up.weight", layer_idx);
             let down_name = format!("blk.{}.ffn_down.weight", layer_idx);
-            
+
             if let (Ok(gate), Ok(up), Ok(down)) = (
                 self.model.get_tensor(&gate_name),
                 self.model.get_tensor(&up_name),
@@ -352,9 +358,12 @@ impl InferenceContext {
                 let gate_proj = mat_vec(&gate, self.model.n_ff, n_embd, &x);
                 // up_proj = up @ x
                 let up_proj = mat_vec(&up, self.model.n_ff, n_embd, &x);
-                // silu(gate_proj) * up_proj
-                let silu_gate = silu(&gate_proj);
-                let ffn_hidden = mul_vec(&silu_gate, &up_proj);
+                // Architecture-specific activation
+                let activated_gate = match self.model.architecture.as_str() {
+                    "gemma" | "gemma2" => gelu(&gate_proj),
+                    _ => silu(&gate_proj), // Llama, Mistral, Phi, Qwen2 use SwiGLU
+                };
+                let ffn_hidden = mul_vec(&activated_gate, &up_proj);
                 // down_proj = down @ ffn_hidden
                 let ffn_output = mat_vec(&down, n_embd, self.model.n_ff, &ffn_hidden);
                 // Residual connection
@@ -367,7 +376,7 @@ impl InferenceContext {
         
         // Final norm
         if let Ok(final_norm) = self.model.get_tensor("output_norm.weight") {
-            x = rms_norm(&x, &final_norm, 1e-5);
+            x = rms_norm(&x, &final_norm, self.model.norm_eps);
         }
         
         // Output projection to logits
@@ -413,7 +422,7 @@ impl InferenceContext {
             // Attention norm
             let attn_norm_name = format!("blk.{}.attn_norm.weight", layer_idx);
             if let Ok(attn_norm_weight) = self.model.get_tensor(&attn_norm_name) {
-                x = rms_norm(&x, &attn_norm_weight, 1e-5);
+                x = rms_norm(&x, &attn_norm_weight, self.model.norm_eps);
             }
 
             // Get Q, K, V projection weights
@@ -469,7 +478,7 @@ impl InferenceContext {
 
             let ffn_norm_name = format!("blk.{}.ffn_norm.weight", layer_idx);
             if let Ok(ffn_norm_weight) = self.model.get_tensor(&ffn_norm_name) {
-                x = rms_norm(&x, &ffn_norm_weight, 1e-5);
+                x = rms_norm(&x, &ffn_norm_weight, self.model.norm_eps);
             }
 
             let gate_name = format!("blk.{}.ffn_gate.weight", layer_idx);
@@ -483,8 +492,12 @@ impl InferenceContext {
             ) {
                 let gate_proj = mat_vec(&gate, self.model.n_ff, n_embd, &x);
                 let up_proj = mat_vec(&up, self.model.n_ff, n_embd, &x);
-                let silu_gate = silu(&gate_proj);
-                let ffn_hidden = mul_vec(&silu_gate, &up_proj);
+                // Architecture-specific activation
+                let activated_gate = match self.model.architecture.as_str() {
+                    "gemma" | "gemma2" => gelu(&gate_proj),
+                    _ => silu(&gate_proj),
+                };
+                let ffn_hidden = mul_vec(&activated_gate, &up_proj);
                 let ffn_output = mat_vec(&down, n_embd, self.model.n_ff, &ffn_hidden);
                 x = add_vec(&ffn_residual, &ffn_output);
             } else {
@@ -499,7 +512,7 @@ impl InferenceContext {
         // Final norm + output
         let output_start = Instant::now();
         if let Ok(final_norm) = self.model.get_tensor("output_norm.weight") {
-            x = rms_norm(&x, &final_norm, 1e-5);
+            x = rms_norm(&x, &final_norm, self.model.norm_eps);
         }
 
         let logits = if let Ok(output_weight) = self.model.get_tensor("output.weight") {
@@ -593,8 +606,8 @@ impl Model {
     /// Return a short summary string for debugging.
     pub fn summary(&self) -> String {
         format!(
-            "Model: embd={}, heads={}, kv_heads={}, d_head={}, layers={}, seq_len={}, rope_theta={}",
-            self.n_embd, self.n_head, self.n_head_kv, self.d_head, self.n_layers, self.max_seq_len, self.rope_theta
+            "Model: arch={}, embd={}, heads={}, kv_heads={}, d_head={}, layers={}, seq_len={}, rope_theta={}, norm_eps={}",
+            self.architecture, self.n_embd, self.n_head, self.n_head_kv, self.d_head, self.n_layers, self.max_seq_len, self.rope_theta, self.norm_eps
         )
     }
 
@@ -629,49 +642,107 @@ impl Model {
         // 1️⃣ Open the GGUF file and parse the header.
         let reader = GgufReader::from_file(&path)?;
 
-        // 2️⃣ Extract required hyper‑parameters from the metadata.
-        //    Missing entries will cause an error – the model cannot be used.
-        //    Try both `general.*` and `llama.*` key naming conventions.
-        let n_embd = reader.get_usize_any(&[
-            "general.embedding_length",
-            "llama.embedding_length",
-        ])?;
-        let n_head = reader.get_usize_any(&[
-            "general.attention_head_count",
-            "llama.attention.head_count",
-        ])?;
-        let n_head_kv = reader.get_usize_any(&[
-            "general.attention_head_count_kv",
-            "llama.attention.head_count_kv",
-        ])?;
-        let d_head = reader.get_usize_any(&[
-            "general.attention_head_dim",
-            "llama.rope.dimension_count",
-        ])?;
-        let max_seq_len = reader.get_usize_any(&[
-            "general.context_length",
-            "llama.context_length",
-        ])?;
-        let vocab_size = reader.get_usize_any(&[
-            "general.vocab_size",
-            "llama.vocab_size",
-        ])?;
+        // 2️⃣ Detect model architecture from metadata.
+        //    Supported: llama, mistral, phi, gemma, qwen2, stablelm
+        let architecture = match reader.get_kv("general.architecture") {
+            Some(GgufValue::Str(s)) => s.clone(),
+            _ => "llama".to_string(),
+        };
+
+        // 3️⃣ Extract required hyper‑parameters from the metadata.
+        //    Try architecture-specific keys first, then fall back to general/llama.
+        let arch_prefix = format!("{architecture}.");
+
+        // Build key arrays with owned strings to avoid temporary value issues
+        let embd_keys = vec![
+            format!("{arch_prefix}embedding_length"),
+            "general.embedding_length".to_string(),
+            "llama.embedding_length".to_string(),
+        ];
+        let n_embd = reader.get_usize_any(&embd_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+
+        let head_keys = vec![
+            format!("{arch_prefix}attention.head_count"),
+            "general.attention.head_count".to_string(),
+            "llama.attention.head_count".to_string(),
+            "general.attention_head_count".to_string(), // legacy naming
+        ];
+        let n_head = reader.get_usize_any(&head_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+
+        let head_kv_keys = vec![
+            format!("{arch_prefix}attention.head_count_kv"),
+            "general.attention.head_count_kv".to_string(),
+            "llama.attention.head_count_kv".to_string(),
+            "general.attention_head_count_kv".to_string(), // legacy naming
+        ];
+        let n_head_kv = reader.get_usize_any(&head_kv_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+
+        let d_head_keys = vec![
+            format!("{arch_prefix}rope.dimension_count"),
+            "general.attention.head_dim".to_string(),
+            "llama.rope.dimension_count".to_string(),
+            "general.attention_head_dim".to_string(), // legacy naming
+        ];
+        let d_head = reader.get_usize_any(&d_head_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+
+        let ctx_keys = vec![
+            format!("{arch_prefix}context_length"),
+            "general.context_length".to_string(),
+            "llama.context_length".to_string(),
+        ];
+        let max_seq_len = reader.get_usize_any(&ctx_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+
+        let vocab_keys = vec![
+            format!("{arch_prefix}vocab_size"),
+            "general.vocab_size".to_string(),
+            "llama.vocab_size".to_string(),
+        ];
+        let vocab_size = reader.get_usize_any(&vocab_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+
         // n_ff is optional; if not found, estimate as 4 * n_embd (common default)
-        let n_ff = reader.get_usize_any(&[
-            "llama.feed_forward_length",
-            "general.feed_forward_length",
-            "llama.intermediate_size",
-        ]).unwrap_or(n_embd * 4);
+        let n_ff_keys = vec![
+            format!("{arch_prefix}feed_forward_length"),
+            format!("{arch_prefix}intermediate_size"),
+            "llama.feed_forward_length".to_string(),
+            "general.feed_forward_length".to_string(),
+            "llama.intermediate_size".to_string(),
+        ];
+        let n_ff = reader.get_usize_any(&n_ff_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>()).unwrap_or(n_embd * 4);
+
         // n_layers is required
-        let n_layers = reader.get_usize_any(&[
-            "llama.block_count",
-            "general.block_count",
-        ])?;
-        // rope_theta is optional, default to 10000.0
-        let rope_theta = match reader.get_kv("llama.rope.freq_base") {
+        let layer_keys = vec![
+            format!("{arch_prefix}block_count"),
+            "llama.block_count".to_string(),
+            "general.block_count".to_string(),
+        ];
+        let n_layers = reader.get_usize_any(&layer_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
+
+        // rope_theta: architecture-specific defaults
+        let rope_theta_keys = vec![
+            format!("{arch_prefix}rope.freq_base"),
+            "llama.rope.freq_base".to_string(),
+        ];
+        let rope_theta = match reader.get_kv_any(&rope_theta_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>()) {
             Some(GgufValue::F32(v)) => *v,
             Some(GgufValue::F64(v)) => *v as f32,
-            _ => 10000.0,
+            _ => {
+                // Architecture-specific defaults
+                match architecture.as_str() {
+                    "gemma" | "gemma2" => 10000.0,
+                    "phi2" | "phi3" => 10000.0,
+                    "qwen2" => 1000000.0,
+                    _ => 10000.0,
+                }
+            }
+        };
+
+        // RMSNorm epsilon: architecture-specific defaults
+        let norm_eps = match architecture.as_str() {
+            "gemma" | "gemma2" => 1e-6,
+            "phi2" | "phi3" => 1e-5,
+            "qwen2" => 1e-6,
+            "stablelm" => 1e-5,
+            _ => 1e-5, // llama, mistral default
         };
 
         // 3️⃣ Create memory-mapped tensor references for lazy loading.
@@ -731,6 +802,7 @@ impl Model {
         Ok(Self {
             tensors,
             interned,
+            architecture,
             n_embd,
             n_head,
             n_head_kv,
@@ -740,6 +812,7 @@ impl Model {
             n_ff,
             n_layers,
             rope_theta,
+            norm_eps,
             vocab_tokens,
             vocab_scores,
             vocab_types,

@@ -1375,6 +1375,17 @@ impl GgufReader {
         self.alignment
     }
 
+    /// Get a metadata value by key, trying multiple keys in order.
+    /// Returns the first key that exists.
+    pub fn get_kv_any<'a>(&'a self, keys: &[&str]) -> Option<&'a GgufValue> {
+        for &key in keys {
+            if let Some(val) = self.get_kv(key) {
+                return Some(val);
+            }
+        }
+        None
+    }
+
     /// Get a metadata value by key.
     ///
     /// Returns `None` if the key is not found.
