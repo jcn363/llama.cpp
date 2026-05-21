@@ -35,6 +35,7 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -419,6 +420,43 @@ pub struct TensorInfo {
     pub dtype: GgmlType,
     /// Offset into the tensor data blob.
     pub offset: u64,
+}
+
+/// Memory-mapped tensor reference - holds a shared mmap plus offset/size.
+/// Enables lazy loading: tensor data is only accessed from the mmap on demand,
+/// letting the OS page in only the needed regions.
+#[derive(Debug, Clone)]
+pub struct MmapTensor {
+    /// Shared reference to the memory-mapped file.
+    pub mmap: Arc<memmap2::Mmap>,
+    /// Byte offset within the mmap where this tensor's data starts.
+    pub offset: usize,
+    /// Size of the tensor data in bytes.
+    pub size: usize,
+}
+
+impl MmapTensor {
+    /// Create a new memory-mapped tensor reference.
+    pub fn new(mmap: Arc<memmap2::Mmap>, offset: usize, size: usize) -> Self {
+        Self { mmap, offset, size }
+    }
+
+    /// Get a slice of the raw tensor data from the mmap.
+    pub fn as_slice(&self) -> Result<&[u8], GgufError> {
+        let end = self.offset + self.size;
+        if end > self.mmap.len() {
+            return Err(GgufError::DecodeError(format!(
+                "tensor data extends beyond mmap (need {end}, have {})",
+                self.mmap.len()
+            )));
+        }
+        Ok(&self.mmap[self.offset..end])
+    }
+
+    /// Dequantize the tensor data directly from the mmap.
+    pub fn dequantize(&self, info: &TensorInfo) -> Result<Vec<f32>, GgufError> {
+        info.dequantize(self.as_slice()?)
+    }
 }
 
 impl TensorInfo {
@@ -999,8 +1037,8 @@ fn dequantize_q6_k(raw: &[u8]) -> Result<Vec<f32>, GgufError> {
 
 /// A GGUF file reader that memory-maps the file for efficient access.
 pub struct GgufReader {
-    /// Memory-mapped file data.
-    data: memmap2::Mmap,
+    /// Memory-mapped file data (shared for lazy tensor loading).
+    data: Arc<memmap2::Mmap>,
     /// GGUF version.
     version: u32,
     /// Number of tensors.
@@ -1158,6 +1196,59 @@ impl GgufReader {
         self.read_tensor_data(info)
     }
 
+    /// Get a shared reference to the memory-mapped file.
+    pub fn mmap(&self) -> &memmap2::Mmap {
+        &self.data
+    }
+
+    /// Get a cloneable Arc reference to the memory-mapped file for sharing.
+    pub fn mmap_arc(&self) -> &Arc<memmap2::Mmap> {
+        &self.data
+    }
+
+    /// Get the byte offset where tensor data begins in the file.
+    pub fn data_offset(&self) -> usize {
+        self.data_offset
+    }
+
+    /// Calculate the byte size of a tensor from its shape and dtype.
+    pub fn tensor_byte_size(&self, info: &TensorInfo) -> GgufResult<usize> {
+        let element_count: usize = info.shape.iter().map(|&d| d as usize).product();
+        let byte_size = match info.dtype {
+            GgmlType::F32 | GgmlType::I32 => element_count * 4,
+            GgmlType::F16 | GgmlType::I16 | GgmlType::Bf16 => element_count * 2,
+            GgmlType::F64 | GgmlType::I64 => element_count * 8,
+            GgmlType::I8 | GgmlType::Q8_0 | GgmlType::Q8_1 | GgmlType::Q8_K => element_count,
+            GgmlType::Q4_0 | GgmlType::Q4_1 => element_count / 2,
+            GgmlType::Q5_0 | GgmlType::Q5_1 => (element_count / 2) + (element_count / 32) * 2,
+            GgmlType::Q2_K | GgmlType::Q3_K => {
+                element_count / 4 + element_count / 64 + element_count / 64
+            }
+            GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K => {
+                element_count / 2 + element_count / 64 + element_count / 64
+            }
+            _ => {
+                return Err(GgufError::DecodeError(format!(
+                    "unsupported dtype for size calculation: {:?}",
+                    info.dtype
+                )));
+            }
+        };
+        Ok(byte_size)
+    }
+
+    /// Create a memory-mapped tensor reference for lazy loading.
+    /// The tensor data is accessed from the shared mmap on demand.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GgufError`] if the tensor size cannot be calculated.
+    pub fn mmap_tensor(&self, info: &TensorInfo, mmap: Arc<memmap2::Mmap>) -> GgufResult<MmapTensor> {
+        let byte_size = self.tensor_byte_size(info)?;
+        let offset = self.data_offset + info.offset as usize;
+        Ok(MmapTensor::new(mmap, offset, byte_size))
+    }
+
     // Existing methods follow...
 
     /// Open a GGUF file from the given path.
@@ -1168,7 +1259,7 @@ impl GgufReader {
     pub fn from_file(path: impl AsRef<Path>) -> GgufResult<Self> {
         let file = std::fs::File::open(path)?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
-        Self::from_mmap(mmap)
+        Self::from_mmap(Arc::new(mmap))
     }
 
     /// Parse a GGUF file from a memory-mapped region.
@@ -1181,7 +1272,7 @@ impl GgufReader {
         clippy::cast_sign_loss,
         clippy::cast_possible_wrap
     )]
-    pub fn from_mmap(mmap: memmap2::Mmap) -> GgufResult<Self> {
+    pub fn from_mmap(mmap: Arc<memmap2::Mmap>) -> GgufResult<Self> {
         let mut reader = CursorReader::new(&mmap);
 
         // 1. Magic
@@ -1282,12 +1373,6 @@ impl GgufReader {
     #[must_use]
     pub fn alignment(&self) -> usize {
         self.alignment
-    }
-
-    /// Returns the offset where tensor data begins.
-    #[must_use]
-    pub fn data_offset(&self) -> usize {
-        self.data_offset
     }
 
     /// Get a metadata value by key.

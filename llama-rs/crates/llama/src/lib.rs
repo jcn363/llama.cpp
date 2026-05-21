@@ -15,14 +15,15 @@ use crate::kv_cache::KvCacheManager;
 use crate::attention::multi_head_attention_with_cache;
 use crate::inference::{embed_token, rms_norm, mat_vec, mul_vec, add_vec, silu, sample_logits, SamplingConfig};
 pub use crate::tokenizer::SimpleTokenizer;
-use gguf::{GgufReader, TensorInfo, GgufError, GgufValue};
+use gguf::{GgufReader, TensorInfo, MmapTensor, GgufError, GgufValue};
 use rayon::prelude::*;
 
 /// Simple struct to hold a tensor that can be lazily de‑quantized.
+/// Uses memory-mapped access: raw data stays on disk until dequantization.
 #[derive(Debug)]
 pub struct TensorData {
-    /// Raw bytes as read from the GGUF file (still quantized).
-    pub raw: Arc<[u8]>,
+    /// Memory-mapped reference to the tensor's raw (quantized) data.
+    pub mmap_tensor: MmapTensor,
     /// Tensor metadata needed for de‑quantization.
     pub info: TensorInfo,
     /// De‑quantized float values – filled on first access.
@@ -38,8 +39,8 @@ impl TensorData {
         if let Some(ref d) = *self.data.read().unwrap() {
             return Ok(d.clone());
         }
-        // Need to de‑quantize.
-        let deq = self.info.dequantize(&self.raw)?;
+        // Need to de‑quantize from mmap.
+        let deq = self.mmap_tensor.dequantize(&self.info)?;
         let arc: Arc<[f32]> = Arc::from(deq.into_boxed_slice());
         // Store for future calls.
         let mut write = self.data.write().unwrap();
@@ -437,22 +438,23 @@ impl Model {
             _ => 10000.0,
         };
 
-        // 3️⃣ Load all tensors (raw bytes) and intern names in parallel.
-        // Use a mutex‑protected interner to safely share across threads.
+        // 3️⃣ Create memory-mapped tensor references for lazy loading.
+        //    Tensor data stays on disk until dequantization is needed.
+        //    The OS pages in only the accessed regions, reducing memory usage.
         let interned = std::sync::Arc::new(std::sync::Mutex::new(InternedStrings::default()));
+        let shared_mmap = reader.mmap_arc().clone();
         let tensors: HashMap<usize, TensorData> = reader
             .tensors()
             .par_iter()
             .map(|info| {
-                // Load raw bytes for this tensor.
-                let raw_bytes = reader.load_tensor_raw(info)?;
-                let raw_arc = Arc::from(raw_bytes.to_vec());
+                // Create mmap reference (no data copied yet).
+                let mmap_tensor = reader.mmap_tensor(info, shared_mmap.clone())?;
                 let shape = info.shape.iter().map(|&d| d as usize).collect();
                 // Intern the name safely.
                 let mut guard = interned.lock().unwrap();
                 let id = guard.intern(&info.name);
                 drop(guard);
-                Ok((id, TensorData { raw: raw_arc, info: info.clone(), data: RwLock::new(None), shape }))
+                Ok((id, TensorData { mmap_tensor, info: info.clone(), data: RwLock::new(None), shape }))
             })
             .collect::<Result<HashMap<_, _>, GgufError>>()?;
         // Extract the interner out of the Arc.
